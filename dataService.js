@@ -25,7 +25,25 @@ const qualifiedRanges = [
 const disqualifiedTicketVolumes = [
   'Menos de 1.000 por mês',
   'Entre 1.000 e 3.000 por mês',
-  'Entre 1.000 e 5.000 por mês'
+  'Entre 1.000 e 5.000 por mês',
+  'Entre 3.000 e 5.000 por mês' // Adicionar variação
+];
+
+// Volumes exclusivos para desqualificar E-commerce (< 10.000)
+const disqualifiedEcommerceVolumes = [
+  'Menos de 1.000 por mês',
+  'Entre 1.000 e 3.000 por mês',
+  'Entre 1.000 e 5.000 por mês',
+  'Entre 3.000 e 5.000 por mês',
+  'Entre 5.000 e 10.000 por mês' // E-commerce precisa > 10.000
+];
+
+// Volumes qualificados para E-commerce (> 10.000)
+const qualifiedEcommerceVolumes = [
+  'Acima de 10.000 por mês',
+  'Entre 10.000 e 50.000 por mês',
+  'Entre 50.000 e 100.000 por mês',
+  'Acima de 100.000 por mês'
 ];
 
 const disqualifiedSegments = [
@@ -33,13 +51,120 @@ const disqualifiedSegments = [
   '⚖️ Escritório de advocacia'
 ];
 
-function classifyLead(fat, vol, seg) {
-  if (disqualifiedRanges.includes(fat)) return 'Lead';
+/**
+ * Classifica um lead como 'Lead' ou 'MQL' baseado nas regras de negócio
+ * Implementa a mesma lógica da query SQL validada
+ *
+ * Regras:
+ * 1. Faturamento adequado (OBRIGATÓRIO)
+ * 2. Não pode ser clínica/advocacia
+ * 3. Volume com exceção para E-commerce:
+ *    - E-commerce: precisa > 10.000 tickets/mês
+ *    - Outros: precisa > 5.000 tickets/mês
+ *
+ * NULL em volume é tratado como OK (assume volume alto)
+ *
+ * @param {string} fat - Faixa de faturamento
+ * @param {string} vol - Volume mensal de tickets (pode ser null)
+ * @param {string} seg - Segmento do lead (pode ser null)
+ * @param {string} market - Mercado do lead (pode ser null)
+ * @returns {string} 'MQL' ou 'Lead'
+ */
+function classifyLead(fat, vol, seg, market = null) {
+  // Regra 1: Faturamento adequado (OBRIGATÓRIO)
+  if (!fat || disqualifiedRanges.includes(fat)) return 'Lead';
+  if (!qualifiedRanges.includes(fat)) return 'Lead';
+
+  // Regra 2: Segmento permitido (clínica/advocacia são excluídos)
   if (seg && disqualifiedSegments.includes(seg)) return 'Lead';
-  if (vol && disqualifiedTicketVolumes.includes(vol)) return 'Lead';
-  if (qualifiedRanges.includes(fat)) return 'MQL';
-  return 'Lead';
+
+  // Regra 3: Volume com regra especial para E-commerce
+  // NULL em volume conta como OK (assume volume adequado)
+  const isEcommerce = market === '🛒 Ecommerce';
+
+  if (isEcommerce) {
+    // E-commerce: precisa > 10.000 tickets/mês
+    // NULL é OK, apenas volumes baixos (<10k) desqualificam
+    if (vol && disqualifiedEcommerceVolumes.includes(vol)) return 'Lead';
+  } else {
+    // Outros mercados: precisa > 5.000 tickets/mês
+    // NULL é OK, apenas volumes baixos (<5k) desqualificam
+    if (vol && disqualifiedTicketVolumes.includes(vol)) return 'Lead';
+  }
+
+  // Passou em todas as regras = MQL
+  return 'MQL';
 }
+
+// ── Stage IDs do Pipedrive ─────────────────────────────────────
+// Validado via Pipedrive API em 2026-03-25
+// Ver: _bmad-output/planning-artifacts/RESULTADOS-VALIDACAO.md
+const STAGE_IDS = {
+  // MQL - Marketing Qualified Lead
+  MQL: [1, 49],
+  // - Stage 1: Pipeline 1 (Geral) - "👤 Lead (MQL)"
+  // - Stage 49: Pipeline 9 (Inbound SDR) - "👤 Lead (MQL)"
+
+  // SQL - Sales Qualified Lead
+  SQL: [19, 50],
+  // - Stage 19: Pipeline 1 (Geral) - "👤 Lead Qualificado (SQL)"
+  // - Stage 50: Pipeline 9 (Inbound SDR) - "👤 Lead Qualificado (SQL)"
+
+  // Reunião Agendada
+  REUNIAO_AGENDADA: [3, 45, 51, 27, 37],
+  // - Stage 3: Pipeline 1 (Geral) - "🗓️ Reunião Ag."
+  // - Stage 45: Pipeline 8 (Inbound Closer) - "🗓️ Reunião Ag. (Confirmada)"
+  // - Stage 51: Pipeline 9 (Inbound SDR) - "🗓️ Reunião Ag. (Incerto)"
+  // - Stage 27: Pipeline 5 (Indicação Closer) - "🗓️ Reunião Ag. (Confirmada)"
+  // - Stage 37: Pipeline 7 (Prospecção Ativa) - "🗓️ Reunião Agendada"
+
+  // Proposta Feita
+  PROPOSTA: [4, 46, 29, 39],
+  // - Stage 4: Pipeline 1 (Geral) - "🧾 Proposta feita"
+  // - Stage 46: Pipeline 8 (Inbound Closer) - "🧾 Proposta feita"
+  // - Stage 29: Pipeline 5 (Indicação Closer) - "🧾 Proposta feita"
+  // - Stage 39: Pipeline 7 (Prospecção Ativa) - "🧾 Proposta feita"
+
+  // Contrato Enviado
+  CONTRATO_ENVIADO: [41, 47, 43, 40],
+  // - Stage 41: Pipeline 1 (Geral) - "Contrato Enviado"
+  // - Stage 47: Pipeline 8 (Inbound Closer) - "✍️ Contrato Enviado"
+  // - Stage 43: Pipeline 5 (Indicação Closer) - "📤 Contrato Enviado"
+  // - Stage 40: Pipeline 7 (Prospecção Ativa) - "📤 Contrato Enviado"
+
+  // Pipeline Total (Negociação)
+  PIPELINE_TOTAL: [46] // Pipeline 8 (Inbound Closer) - "🧾 Proposta feita"
+};
+
+// ── Custom Fields do Pipedrive ─────────────────────────────────
+// Validado via Pipedrive API em 2026-03-25
+// Ver: _bmad-output/planning-artifacts/RESULTADOS-VALIDACAO.md
+const CUSTOM_FIELDS = {
+  // Field: "SQL?" (ID: 80, Type: enum)
+  SQL_FLAG: {
+    key: '2e17191cfb8e6f4a58359adc42a08965a068e8bc',
+    values: {
+      SIM: '75',      // "Sim"
+      NAO: '76',      // "Não"
+      A_REVISAR: '79' // "A revisar"
+    }
+  },
+
+  // Field: "Data Reunião" (ID: 46, Type: date)
+  DATA_REUNIAO: {
+    key: '8eff24b00226da8dfb871caaf638b62af68bf16b'
+    // Formato: YYYY-MM-DD
+  },
+
+  // Field: "Reunião Realizada" (ID: 74, Type: enum)
+  REUNIAO_REALIZADA: {
+    key: 'baf2724fcbeec84a36e90f9dc3299431fe1b0dd3',
+    values: {
+      SIM: '47',  // "Sim"
+      NAO: '59'   // "Não"
+    }
+  }
+};
 
 export const fetchMonthlyMetrics = async () => {
   try {
@@ -66,7 +191,7 @@ export const fetchMonthlyMetrics = async () => {
       fetchAll('meta_ads_costs', 'spend, impressions, date_start'),
       fetchAll('google_ads_costs', 'spend, impressions, clicks, conversions, date'),
       fetchAll('meta_ads_actions', 'action_type, value, date_start'),
-      fetchAll('yayforms_responses', 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment'),
+      fetchAll('yayforms_responses', 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market'),
       fetchAll('crm_deals', 'deal_created_at, stage_id, status, value, custom_fields, person_email, won_time, deal_id, lost_reason'),
       fetchAll('crm_stage_transitions', 'deal_id, to_stage_id, time_in_previous_stage_sec')
     ]);
@@ -228,7 +353,8 @@ export const fetchMonthlyMetrics = async () => {
         const classification = classifyLead(
           l.lead_revenue_range,
           l.lead_monthly_volume,
-          l.lead_segment
+          l.lead_segment,
+          l.lead_market // Adicionar market para regra E-commerce
         );
         if (classification === 'MQL') {
           updateMetrics(m, l, 1, 'n', 'mql', wk);
@@ -261,27 +387,36 @@ export const fetchMonthlyMetrics = async () => {
         if (!mk) return;
         const m = initMonth(mk);
 
-        // Pipeline Total: Sum(crm_deals.value) WHERE stage_id = 46
-        if (d.stage_id === 46) updateMetrics(m, d, d.value, 'g', 'pipe', wk);
+        // Pipeline Total: Sum(crm_deals.value) WHERE stage_id IN PIPELINE_TOTAL
+        if (STAGE_IDS.PIPELINE_TOTAL.includes(d.stage_id)) {
+          updateMetrics(m, d, d.value, 'g', 'pipe', wk);
+        }
 
-        // Motivos de perda
+        // Motivos de perda (por etapa do funil)
         if (d.status === 'lost' && d.lost_reason) {
-          if ([1, 3, 49].includes(d.stage_id)) {
+          // Perdas na etapa MQL
+          if (STAGE_IDS.MQL.includes(d.stage_id)) {
             m.perdas.mql.push(d.lost_reason);
             if (wk && m.wk[wk]) m.wk[wk].perdas.mql.push(d.lost_reason);
-          } else if ([4, 50].includes(d.stage_id)) {
+          }
+          // Perdas na etapa SQL
+          else if (STAGE_IDS.SQL.includes(d.stage_id)) {
             m.perdas.sql.push(d.lost_reason);
             if (wk && m.wk[wk]) m.wk[wk].perdas.sql.push(d.lost_reason);
-          } else if ([47].includes(d.stage_id)) {
+          }
+          // Perdas na etapa Proposta/Contrato
+          else if (STAGE_IDS.PROPOSTA.includes(d.stage_id) || STAGE_IDS.CONTRATO_ENVIADO.includes(d.stage_id)) {
             m.perdas.proposta.push(d.lost_reason);
             if (wk && m.wk[wk]) m.wk[wk].perdas.proposta.push(d.lost_reason);
           }
         }
 
-        // SQL, Reuniões agendadas e realizadas — sem filtro de stage_id
+        // SQL, Reuniões agendadas e realizadas — baseado em custom fields
         // Data base: data de criação do lead (fallback: deal_created_at)
         const cj = parseCustomFields(d.custom_fields);
-        const isSQL = cj['2e17191cfb8e6f4a58359adc42a08965a068e8bc'] == '75';
+
+        // Verifica se deal está marcado como SQL no custom field "SQL?"
+        const isSQL = cj[CUSTOM_FIELDS.SQL_FLAG.key] == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
         if (isSQL) {
           const dealEmail = d.person_email?.toLowerCase().trim();
           const leadDate = dealEmail ? leadDateByEmail[dealEmail] : null;
@@ -293,14 +428,15 @@ export const fetchMonthlyMetrics = async () => {
 
           updateMetrics(sqlM, d, 1, 'n', 'sql', sqlWk);
 
-          // Reunião agendada date (actual date stored in custom field)
-          const agendamentoDate = cj['8eff24b00226da8dfb871caaf638b62af68bf16b'];
+          // Reunião agendada: verifica se campo "Data Reunião" está preenchido
+          const agendamentoDate = cj[CUSTOM_FIELDS.DATA_REUNIAO.key];
           if (agendamentoDate && agendamentoDate !== '') {
             updateMetrics(sqlM, d, 1, 'n', 'rAg', sqlWk);
           }
 
-          // Reunião realizada: campo = '47'
-          if (cj['baf2724fcbeec84a36e90f9dc3299431fe1b0dd3'] == '47') {
+          // Reunião realizada: verifica se campo "Reunião Realizada" = "Sim"
+          const reuniaoRealizada = cj[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
+          if (reuniaoRealizada) {
             updateMetrics(sqlM, d, 1, 'n', 'rRe', sqlWk);
           }
 
@@ -315,16 +451,20 @@ export const fetchMonthlyMetrics = async () => {
 
           const dealTransitions = transitionsByDeal[d.deal_id] || [];
 
-          // 1. MQL → SQL: transition into SQL stages (4, 50)
-          const sqlTransition = dealTransitions.find(t => [4, 50].includes(t.to_stage_id) && t.time_in_previous_stage_sec);
+          // 1. MQL → SQL: transição para stages SQL (validado via API)
+          const sqlTransition = dealTransitions.find(t =>
+            STAGE_IDS.SQL.includes(t.to_stage_id) && t.time_in_previous_stage_sec
+          );
           if (sqlTransition) {
             const dMs = Math.round(Number(sqlTransition.time_in_previous_stage_sec) / (60 * 60 * 24));
             sqlM._deltas.ms.push(dMs);
             if (sqlWk && sqlM.wk[sqlWk]) sqlM.wk[sqlWk]._deltas.ms.push(dMs);
           }
 
-          // 2. SQL → Reunião agendada: transition into Meeting stages (6, 7, 45)
-          const meetingTransition = dealTransitions.find(t => [6, 7, 45].includes(t.to_stage_id) && t.time_in_previous_stage_sec);
+          // 2. SQL → Reunião: transição para stages de Reunião (validado via API)
+          const meetingTransition = dealTransitions.find(t =>
+            STAGE_IDS.REUNIAO_AGENDADA.includes(t.to_stage_id) && t.time_in_previous_stage_sec
+          );
           if (meetingTransition) {
             const dSr = Math.round(Number(meetingTransition.time_in_previous_stage_sec) / (60 * 60 * 24));
             sqlM._deltas.sr.push(dSr);
@@ -356,7 +496,7 @@ export const fetchMonthlyMetrics = async () => {
     const finalize = (m) => {
       const { g, n, p, f } = m;
       g.roi = g.gAds > 0 ? g.rec / g.gAds : 0;
-      g.mc = g.rec - (g.rec * 0.17) - m._churnTemp;
+      g.mc = g.rec - (g.rec * 0.095) - m._churnTemp;
       g.fatP = g.pipe * 0.2;
       g.recP = g.rec + g.fatP;
       g.tmf = g.vendas > 0 ? g.rec / g.vendas : 0;
