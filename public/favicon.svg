@@ -1,6 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <rect width="32" height="32" rx="4" fill="#2D3648"/>
-  <text x="4" y="23" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="17" font-weight="700" letter-spacing="-0.5">
-    <tspan fill="#FFFFFF">A</tspan><tspan fill="#007AFF">w</tspan>
-  </text>
+  <text x="4" y="23" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="17" font-weight="700" letter-spacing="-0.5" fill="#007AFF">Aw</text>
 </svg>
