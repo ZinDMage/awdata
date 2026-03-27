@@ -50,3 +50,11 @@ coverage/
 
 # Claude
 .claude
+
+# BMAD tooling
+BMAD-METHOD/
+_bmad/
+_bmad-output/
+docs/
+.omc/
+src/__mocks__/

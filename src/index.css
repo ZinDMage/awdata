@@ -1,0 +1,118 @@
+@import "tailwindcss";
+
+/*
+ * AwData Design Tokens — Apple-inspired (UX-DR1)
+ * Dark mode as default (UX-DR15)
+ */
+
+@theme {
+  /* ── Cores semânticas de superfície ── */
+  --color-surface-primary: #000000;
+  --color-surface-secondary: #1c1c1e;
+  --color-surface-tertiary: #2c2c2e;
+
+  /* ── Cores semânticas de conteúdo ── */
+  --color-content-primary: #f5f5f7;
+  --color-content-secondary: #a1a1a6;
+  --color-content-tertiary: #86868b;
+
+  /* ── Border ── */
+  --color-border-subtle: rgba(255, 255, 255, 0.1);
+
+  /* ── Cores de estado ── */
+  --color-positive: #34C759;
+  --color-negative: #FF453A;
+  --color-warning: #FFD60A;
+  --color-info: #007AFF;
+
+  /* ── Cores por área do funil ── */
+  --color-marketing: #007AFF;
+  --color-sdr: #FF9500;
+  --color-closer: #34C759;
+  --color-financeiro: #FF453A;
+  --color-deltas: #AF52DE;
+
+  /* ── Brand ── */
+  --color-brand-primary: #2D3648;
+
+  /* ── Border Radius ── */
+  --radius-card: 16px;
+  --radius-pill: 20px;
+  --radius-control: 8px;
+  --radius-table: 14px;
+
+  /* ── Transitions Apple-style (UX-DR23) ── */
+  --duration-apple: 300ms;
+  --ease-apple: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Smooth dark/light mode transition (AC4 — Story 8.4) ── */
+html, body,
+[style*="background"] {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* ── Light mode override ── */
+.light {
+  --color-surface-primary: #ffffff;
+  --color-surface-secondary: #f5f5f7;
+  --color-surface-tertiary: #e5e5ea;
+  --color-content-primary: #1d1d1f;
+  --color-content-secondary: #424245;
+  --color-content-tertiary: #86868b;
+  --color-border-subtle: rgba(0, 0, 0, 0.1);
+}
+
+@media (prefers-color-scheme: light) {
+  html:not(.dark) {
+    --color-surface-primary: #ffffff;
+    --color-surface-secondary: #f5f5f7;
+    --color-surface-tertiary: #e5e5ea;
+    --color-content-primary: #1d1d1f;
+    --color-content-secondary: #424245;
+    --color-content-tertiary: #86868b;
+    --color-border-subtle: rgba(0, 0, 0, 0.1);
+  }
+}
+
+/* ── Tabular nums for data display (UX-DR16) ── */
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Preserve existing CSS variables from index.html ── */
+:root {
+  --color-background-primary: var(--color-surface-primary);
+  --color-background-secondary: var(--color-surface-secondary);
+  --color-text-primary: var(--color-content-primary);
+  --color-text-secondary: var(--color-content-secondary);
+  --color-text-tertiary: var(--color-content-tertiary);
+  --color-border-secondary: var(--color-border-subtle);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-surface-primary);
+  color: var(--color-content-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* ── FilterBar interactive controls (UX-DR17, UX-DR19) ── */
+[role="tab"]:focus-visible,
+[role="switch"]:focus-visible {
+  outline: 2px solid #007AFF;
+  outline-offset: -2px;
+}
+
+[role="tab"]:active,
+[role="switch"]:active {
+  transform: scale(0.98);
+}

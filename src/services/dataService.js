@@ -1,134 +1,38 @@
 import { supabase } from './supabaseClient';
+import {
+  STAGE_IDS,
+  CUSTOM_FIELDS,
+  PIPELINE_FUNNELS,
+  FUNNEL_LABELS,
+  getFunnelKey,
+  parseCustomFields,
+} from '@/config/pipedrive';
+import { fetchAll } from './fetchService';
+import { classifyLead } from './classificationService';
 
 /**
  * Data Service for Dash AwSales
- * Handles aggregation of business metrics from Supabase tables.
+ * Orchestrates data fetching and metric aggregation.
  *
  * Supports two view modes:
  *   - "performance": metrics attributed to when the event happened
  *   - "criacao": metrics attributed to when the lead/deal was created (cohort view)
  */
 
-// ── Regras de Qualificação MQL ─────────────────────────────────
-const disqualifiedRanges = [
-  'Zero até o momento',
-  'Menos de R$100 mil',
-  'Entre R$100 mil e R$500 mil',
-  'Entre R$500 mil e R$1 milhão'
-];
+// Re-export for consumers that import from dataService
+export { PIPELINE_FUNNELS, FUNNEL_LABELS };
 
-const qualifiedRanges = [
-  'Entre R$1 milhão a R$5 milhões',
-  'Entre R$5 milhões a R$10 milhões',
-  'Entre R$10 milhões a R$25 milhões',
-  'Entre R$25 milhões a R$50 milhões',
-  'Acima de R$50 milhões',
-  'Acima de R$10 milhões'
-];
-
-const disqualifiedTicketVolumes = [
-  'Menos de 1.000 por mês',
-  'Entre 1.000 e 3.000 por mês',
-  'Entre 1.000 e 5.000 por mês',
-  'Entre 3.000 e 5.000 por mês'
-];
-
-const disqualifiedEcommerceVolumes = [
-  'Menos de 1.000 por mês',
-  'Entre 1.000 e 3.000 por mês',
-  'Entre 1.000 e 5.000 por mês',
-  'Entre 3.000 e 5.000 por mês',
-  'Entre 5.000 e 10.000 por mês'
-];
-
-const qualifiedEcommerceVolumes = [
-  'Acima de 10.000 por mês',
-  'Entre 10.000 e 50.000 por mês',
-  'Entre 50.000 e 100.000 por mês',
-  'Acima de 100.000 por mês'
-];
-
-const disqualifiedSegments = [
-  '🩺 Clínica / consultório',
-  '⚖️ Escritório de advocacia'
-];
-
-function classifyLead(fat, vol, seg, market = null) {
-  if (!fat || disqualifiedRanges.includes(fat)) return 'Lead';
-  if (!qualifiedRanges.includes(fat)) return 'Lead';
-  if (seg && disqualifiedSegments.includes(seg)) return 'Lead';
-  const isEcommerce = market === '🛒 Ecommerce';
-  if (isEcommerce) {
-    if (vol && disqualifiedEcommerceVolumes.includes(vol)) return 'Lead';
-  } else {
-    if (vol && disqualifiedTicketVolumes.includes(vol)) return 'Lead';
-  }
-  return 'MQL';
-}
-
-// ── Stage IDs do Pipedrive ─────────────────────────────────────
-const STAGE_IDS = {
-  MQL: [1, 49],
-  SQL: [19, 50],
-  REUNIAO_AGENDADA: [3, 45, 51, 27, 37],
-  PROPOSTA: [4, 46, 29, 39],
-  CONTRATO_ENVIADO: [41, 47, 43, 40],
-  PIPELINE_TOTAL: [46]
-};
-
-// ── Custom Fields do Pipedrive ─────────────────────────────────
-const CUSTOM_FIELDS = {
-  SQL_FLAG: {
-    key: '2e17191cfb8e6f4a58359adc42a08965a068e8bc',
-    values: { SIM: '75', NAO: '76', A_REVISAR: '79' }
-  },
-  DATA_REUNIAO: {
-    key: '8eff24b00226da8dfb871caaf638b62af68bf16b'
-  },
-  REUNIAO_REALIZADA: {
-    key: 'baf2724fcbeec84a36e90f9dc3299431fe1b0dd3',
-    values: { SIM: '47', NAO: '59' }
-  },
-  DATA_QUALIFICACAO: {
-    key: '99ce1624c66efcf108dbf99f06fcbb7bd79570f7'
-  }
-};
-
-// ── Mapeamento de Funis por Pipeline ID ────────────────────────
-export const PIPELINE_FUNNELS = {
-  inbound:   [1, 8, 9],
-  indicacao: [2, 3, 5],
-  eventos:   [4],
-  wordwild:  [7],
-  clinicas:  [],
-};
-
-const parseCustomFields = (cf) => {
-  if (!cf) return {};
-  if (typeof cf === 'string') {
-    try { return JSON.parse(cf); } catch { return {}; }
-  }
-  return cf;
+// Active funnel configuration (FR11, FR26, FR27, AD-4)
+export const FUNNEL_CONFIG = {
+  inbound:   { label: 'Inbound',    pipelines: PIPELINE_FUNNELS.inbound,   hasSpending: true },
+  indicacao: { label: 'Indicação',  pipelines: PIPELINE_FUNNELS.indicacao, hasSpending: false },
+  wordwild:  { label: 'Word Wild',  pipelines: PIPELINE_FUNNELS.wordwild,  hasSpending: false },
 };
 
 export const fetchMonthlyMetrics = async () => {
   try {
-    const fetchAll = async (table, selectStr) => {
-      let all = [];
-      let from = 0;
-      let size = 1000;
-      while (true) {
-        const { data, error } = await supabase.from(table).select(selectStr).range(from, from + size - 1);
-        if (error) { console.error(`Supabase Error on ${table}:`, error); break; }
-        if (!data || data.length === 0) break;
-        all = all.concat(data);
-        if (data.length < size) break;
-        from += size;
-      }
-      return { data: all };
-    };
-
-    const results = await Promise.all([
+    const TABLE_NAMES = ['sales', 'meta_ads_costs', 'google_ads_costs', 'meta_ads_actions', 'yayforms_responses', 'crm_deals', 'crm_stage_transitions'];
+    const settled = await Promise.allSettled([
       fetchAll('sales', 'id, receita_gerada, data_fechamento, status, email_pipedrive, email_stripe'),
       fetchAll('meta_ads_costs', 'spend, impressions, date_start'),
       fetchAll('google_ads_costs', 'spend, impressions, clicks, conversions, date'),
@@ -137,6 +41,20 @@ export const fetchMonthlyMetrics = async () => {
       fetchAll('crm_deals', 'deal_created_at, stage_id, pipeline_id, status, value, custom_fields, person_email, won_time, deal_id, lost_reason'),
       fetchAll('crm_stage_transitions', 'deal_id, to_stage_id, time_in_previous_stage_sec')
     ]);
+
+    let _partialData = false;
+    const results = settled.map((result, i) => {
+      if (result.status === 'fulfilled') {
+        if (result.value.error) {
+          console.warn(`[dataService] Tabela "${TABLE_NAMES[i]}" retornou com erro — usando dados parciais`);
+          _partialData = true;
+        }
+        return result.value;
+      }
+      console.warn(`[dataService] Fetch da tabela "${TABLE_NAMES[i]}" falhou:`, result.reason);
+      _partialData = true;
+      return { data: [], error: true };
+    });
 
     const [
       { data: salesRaw },
@@ -151,11 +69,18 @@ export const fetchMonthlyMetrics = async () => {
     // ── Pre-compute shared lookup maps (used by both modes) ─────
 
     const dealDateByEmail = {};
+    const dealFunnelByEmail = {};
     if (dealsRaw) {
       dealsRaw.forEach(d => {
         if (d.person_email && d.deal_created_at) {
           const emailKey = d.person_email.toLowerCase().trim();
           if (!dealDateByEmail[emailKey]) dealDateByEmail[emailKey] = d.deal_created_at;
+          // Funnel assignment: specific funnels (indicacao, wordwild) take priority over inbound
+          const fk = getFunnelKey(d.pipeline_id) || 'inbound';
+          const existing = dealFunnelByEmail[emailKey];
+          if (!existing || (existing === 'inbound' && fk !== 'inbound')) {
+            dealFunnelByEmail[emailKey] = fk;
+          }
         }
       });
     }
@@ -206,6 +131,7 @@ export const fetchMonthlyMetrics = async () => {
       const getWeekKey = (dateStr) => {
         if (!dateStr) return null;
         const day = new Date(dateStr).getUTCDate();
+        if (isNaN(day)) return null;
         if (day <= 7) return "s1";
         if (day <= 14) return "s2";
         if (day <= 21) return "s3";
@@ -233,9 +159,6 @@ export const fetchMonthlyMetrics = async () => {
         return map[key];
       };
 
-      const getFunnelKey = (pipelineId) =>
-        Object.keys(PIPELINE_FUNNELS).find(k => PIPELINE_FUNNELS[k].includes(pipelineId)) ?? null;
-
       const initMonth = (key) => initMonthInMap(metricsByMonth, key);
 
       const updateMetrics = (m, row, val, type, field, wkKey) => {
@@ -253,18 +176,24 @@ export const fetchMonthlyMetrics = async () => {
           // Date for g.rec, g.vendas (revenue cards)
           let recDate;
           if (mode === 'criacao') {
-            // Criação: só conta vendas com tracking no CRM (sem fallback)
+            // Criação: use deal_created_at (cohort view); skip sale if no CRM match
             recDate = (emailPipe && dealDateByEmail[emailPipe])
               || (emailStripe && dealDateByEmail[emailStripe]);
+            if (!recDate) return;
           } else {
             recDate = s.data_fechamento;
           }
+
+          // Resolve funnel from deal lookup (FR26, FR27, AD-4)
+          const saleFunnel = (emailPipe && dealFunnelByEmail[emailPipe])
+            || (emailStripe && dealFunnelByEmail[emailStripe])
+            || 'inbound';
 
           const mk = getMonthKey(recDate);
           const wk = getWeekKey(recDate);
           if (!mk) return;
           const m = initMonth(mk);
-          const mi = initMonthInMap(metricsByMonthByFunnel['inbound'], mk);
+          const mi = initMonthInMap(metricsByMonthByFunnel[saleFunnel], mk);
 
           updateMetrics(m, s, s.receita_gerada, 'g', 'rec', wk);
           updateMetrics(m, s, 1, 'g', 'vendas', wk);
@@ -272,10 +201,12 @@ export const fetchMonthlyMetrics = async () => {
           updateMetrics(mi, s, 1, 'g', 'vendas', wk);
 
           // Date for n.v (# Vendas in Números)
+          // Criação: attribute to deal_created_at (cohort); Performance: data_fechamento
           let nvDate;
           if (mode === 'criacao') {
             nvDate = (emailPipe && dealDateByEmail[emailPipe])
               || (emailStripe && dealDateByEmail[emailStripe]);
+            // No CRM match → skip n.v only (cards already counted above)
           } else {
             nvDate = s.data_fechamento;
           }
@@ -285,7 +216,7 @@ export const fetchMonthlyMetrics = async () => {
             const nWk = getWeekKey(nvDate);
             if (nMk) {
               const nM = initMonth(nMk);
-              const nMi = initMonthInMap(metricsByMonthByFunnel['inbound'], nMk);
+              const nMi = initMonthInMap(metricsByMonthByFunnel[saleFunnel], nMk);
               updateMetrics(nM, s, 1, 'n', 'v', nWk);
               updateMetrics(nMi, s, 1, 'n', 'v', nWk);
             }
@@ -361,7 +292,9 @@ export const fetchMonthlyMetrics = async () => {
           const wk = getWeekKey(l.submitted_at);
           if (!mk) return;
           const m = initMonth(mk);
-          const mi = initMonthInMap(metricsByMonthByFunnel['inbound'], mk);
+          // YayForms only contains Inbound leads; Indicação/WD leads come from CRM only
+          const leadFunnel = 'inbound';
+          const mi = initMonthInMap(metricsByMonthByFunnel[leadFunnel], mk);
           updateMetrics(m, l, 1, 'n', 'ld', wk);
           updateMetrics(mi, l, 1, 'n', 'ld', wk);
 
@@ -401,7 +334,7 @@ export const fetchMonthlyMetrics = async () => {
               if (baseWk && m.wk[baseWk]) m.wk[baseWk].perdas.mql.push(d.lost_reason);
               if (mf) { mf.perdas.mql.push(d.lost_reason); if (baseWk && mf.wk[baseWk]) mf.wk[baseWk].perdas.mql.push(d.lost_reason); }
             }
-            else if (STAGE_IDS.SQL.includes(d.stage_id)) {
+            else if (STAGE_IDS.SQL.includes(d.stage_id) || STAGE_IDS.REUNIAO_AGENDADA.includes(d.stage_id)) {
               m.perdas.sql.push(d.lost_reason);
               if (baseWk && m.wk[baseWk]) m.wk[baseWk].perdas.sql.push(d.lost_reason);
               if (mf) { mf.perdas.sql.push(d.lost_reason); if (baseWk && mf.wk[baseWk]) mf.wk[baseWk].perdas.sql.push(d.lost_reason); }
@@ -413,8 +346,10 @@ export const fetchMonthlyMetrics = async () => {
             }
           }
 
+          // FR22: parseCustomFields always returns {} for null/invalid — safe to index
           const cj = parseCustomFields(d.custom_fields);
-          const isSQL = cj[CUSTOM_FIELDS.SQL_FLAG.key] == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+          // AC2: SQL_FLAG absent/null/undefined => isSQL defaults to false (no false positive)
+          const isSQL = (cj[CUSTOM_FIELDS.SQL_FLAG.key] ?? null) == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
 
           if (isSQL) {
             // ── SQL date (mode-aware) ──
@@ -452,7 +387,8 @@ export const fetchMonthlyMetrics = async () => {
             }
 
             // ── Reunião realizada (mode-aware) ──
-            const reuniaoRealizada = cj[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
+            // AC5: REUNIAO_REALIZADA absent/null/undefined => reuniaoRealizada defaults to false
+            const reuniaoRealizada = (cj[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] ?? null) == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
             if (reuniaoRealizada) {
               let rReMk, rReWk;
               if (mode === 'performance') {
@@ -502,23 +438,18 @@ export const fetchMonthlyMetrics = async () => {
               STAGE_IDS.REUNIAO_AGENDADA.includes(t.to_stage_id) && t.time_in_previous_stage_sec
             );
             if (meetingTransition) {
-              const dSr = Math.round(Number(meetingTransition.time_in_previous_stage_sec) / (60 * 60 * 24));
-              deltaM._deltas.sr.push(dSr);
-              if (baseWk && deltaM.wk[baseWk]) deltaM.wk[baseWk]._deltas.sr.push(dSr);
-              if (deltaMf) { deltaMf._deltas.sr.push(dSr); if (baseWk && deltaMf.wk[baseWk]) deltaMf.wk[baseWk]._deltas.sr.push(dSr); }
+              const secVal = Number(meetingTransition.time_in_previous_stage_sec);
+              if (!isNaN(secVal)) {
+                const dSr = Math.round(secVal / (60 * 60 * 24));
+                deltaM._deltas.sr.push(dSr);
+                if (baseWk && deltaM.wk[baseWk]) deltaM.wk[baseWk]._deltas.sr.push(dSr);
+                if (deltaMf) { deltaMf._deltas.sr.push(dSr); if (baseWk && deltaMf.wk[baseWk]) deltaMf.wk[baseWk]._deltas.sr.push(dSr); }
+              }
             }
 
-            // 3. Proposta Feita → Venda
-            const propostaTransition = dealTransitions.find(t =>
-              STAGE_IDS.PROPOSTA.includes(t.to_stage_id) && t.time_in_previous_stage_sec
-            );
-            if (propostaTransition && saleDate && d.deal_created_at) {
-              const secToSQL      = sqlTransition     ? Number(sqlTransition.time_in_previous_stage_sec)      : 0;
-              const secToMeeting  = meetingTransition ? Number(meetingTransition.time_in_previous_stage_sec)  : 0;
-              const secToProposta = Number(propostaTransition.time_in_previous_stage_sec);
-              const totalSecToProposta = secToSQL + secToMeeting + secToProposta;
-              const propostaEntryDate = new Date(new Date(d.deal_created_at).getTime() + totalSecToProposta * 1000);
-              const dRv = daysDiff(propostaEntryDate, saleDate);
+            // 3. Reunião Agendada → Venda (FR14: Reunião→Venda)
+            if (agendamentoDate && saleDate) {
+              const dRv = daysDiff(agendamentoDate, saleDate);
               if (dRv !== null) {
                 deltaM._deltas.rv.push(dRv);
                 if (baseWk && deltaM.wk[baseWk]) deltaM.wk[baseWk]._deltas.rv.push(dRv);
@@ -549,7 +480,7 @@ export const fetchMonthlyMetrics = async () => {
         g.tmf = g.vendas > 0 ? g.rec / g.vendas : 0;
         f.gAds = g.gAds;
 
-        const calcP = (num, den) => den > 0 ? num / den : 0;
+        const calcP = (num, den) => den > 0 ? num / den : (num === 0 ? null : 0);
         p.ctr = calcP(n.cli, n.imp);
         p.cr = calcP(n.vp, n.cli);
         p.cc = calcP(n.ld, n.vp);
@@ -567,7 +498,7 @@ export const fetchMonthlyMetrics = async () => {
         f.cpRR = calcP(f.gAds, n.rRe);
         f.cpV = calcP(f.gAds, n.v);
 
-        const avg = arr => arr.length > 0 ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
+        const avg = arr => arr.length > 0 ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : null;
         if (m._deltas) {
           m.dt.ms = avg(m._deltas.ms);
           m.dt.sr = avg(m._deltas.sr);
@@ -583,7 +514,7 @@ export const fetchMonthlyMetrics = async () => {
           return Object.entries(counts)
             .sort((a, b) => b[1] - a[1])
             .slice(0, 3)
-            .map(([r, c]) => ({ m: r, p: Math.round((c / total) * 100) }));
+            .map(([r, c]) => ({ m: r, p: Math.round((c / total) * 100), c }));
         };
 
         if (m.perdas) {
@@ -608,7 +539,8 @@ export const fetchMonthlyMetrics = async () => {
 
     return {
       performance: processMode('performance'),
-      criacao: processMode('criacao')
+      criacao: processMode('criacao'),
+      _partialData
     };
   } catch (err) {
     console.error("Critical error in data service:", err);
