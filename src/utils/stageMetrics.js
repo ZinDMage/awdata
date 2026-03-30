@@ -350,7 +350,7 @@ function propostaKpis(deals, context = {}) {
       icon: '📈', iconColor: 'positive',
       label: 'Receita Projetada',
       value: receitaProjetada != null ? F.ri(receitaProjetada) : '—',
-      detail: convRate != null ? `${Math.round(convRate * 100)}% conv. R. Realizada` : '—',
+      detail: convRate != null ? `${Math.round(convRate * 100)}% conv. Proposta` : '—',
       description: 'Faturamento × conversão reunião realizada',
     },
     {
