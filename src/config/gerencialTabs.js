@@ -77,14 +77,11 @@ export const TAB_CONFIG = {
     label: 'Proposta',
     columns: [
       { key: 'title',           label: 'Deal',            format: null },
-      { key: 'person_name',     label: 'Pessoa',          format: null },
       { key: 'person_email',    label: 'Email',           format: null },
       { key: 'person_phone',    label: 'Telefone',        format: null },
-      { key: 'mercado',         label: 'Mercado',          format: null,   filterable: true },
       { key: 'value',           label: 'Valor',            format: (v) => F.ri(v) },
-      { key: 'stage_name',      label: 'Stage',            format: null },
-      { key: 'days_in_stage',   label: 'Dias no Stage',    format: null },
-      { key: 'faturamento_anual', label: 'Faturamento Anual', format: (v) => F.ri(v) },
+      { key: 'data_proposta',   label: 'Data Proposta',    format: (v) => F.date(v) },
+      { key: 'stage_name',      label: 'Etapa',            format: null },
     ],
   },
 

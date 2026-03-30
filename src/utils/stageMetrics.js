@@ -143,6 +143,68 @@ function buildAgingBar(deals, title = 'Aging') {
   return { bars, title, subtitle: 'Distribuição por tempo no stage', mode: 'aging' };
 }
 
+/**
+ * Build 5-day revenue forecast bar chart.
+ * For each open deal, projects close date = data_reuniao + avgCycleDays.
+ * Groups expected revenue by day for the next 5 days.
+ */
+function buildRevenueForecastBar(deals, avgCycleDays, convRate) {
+  if (!deals.length || avgCycleDays == null) return null;
+
+  const roundedCycle = Math.round(avgCycleDays);
+  const multiplier = convRate ?? 1;
+
+  // Helper: add N days to a YYYY-MM-DD string, returns YYYY-MM-DD
+  const addDays = (dateStr, n) => {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dt = new Date(y, m - 1, d + n);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  };
+
+  // Today as YYYY-MM-DD (local)
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  // Build 5-day buckets keyed by YYYY-MM-DD
+  const FORECAST_DAYS = 5;
+  const buckets = [];
+  for (let i = 0; i < FORECAST_DAYS; i++) {
+    const dateKey = addDays(todayStr, i);
+    const [, mm, dd] = dateKey.split('-');
+    const dayLabel = i === 0 ? 'Hoje' : `${dd}/${mm}`;
+    buckets.push({ dateKey, label: dayLabel, value: 0 });
+  }
+
+  const bucketMap = {};
+  for (const b of buckets) bucketMap[b.dateKey] = b;
+
+  for (const deal of deals) {
+    const propDate = deal.data_proposta ?? deal.data_reuniao;
+    if (!propDate) continue;
+    // Normalize to YYYY-MM-DD (handle both ISO strings and date objects)
+    const raw = String(propDate).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) continue;
+    const expectedKey = addDays(raw, roundedCycle);
+    if (bucketMap[expectedKey]) {
+      bucketMap[expectedKey].value += (deal.value ?? deal.deal_value ?? 0) * multiplier;
+    }
+  }
+
+  const bars = buckets.map(b => ({
+    label: b.label,
+    value: b.value,
+    color: '#3B82F6',
+  }));
+
+  return {
+    bars,
+    title: 'Receita Esperada (5 dias)',
+    subtitle: `Ciclo ${roundedCycle} dias · ${convRate != null ? Math.round(convRate * 100) + '% conv.' : 'sem taxa conv.'}`,
+    mode: 'forecast',
+    formatValue: v => F.ri(v),
+  };
+}
+
 /** Empty KPI card with dashes */
 function emptyCard(icon, iconColor, label) {
   return { icon, iconColor, label, value: '—', detail: '—', description: '' };
@@ -332,10 +394,9 @@ function propostaKpis(deals, context = {}) {
     .filter(v => v != null);
   const avgCycle = avg(cycleDays);
 
-  // Conversão reunião realizada → vendas (from bowtie context)
-  const rrCount = context.reuniaoRealizadaCount;
-  const vCount = context.vendasCount;
-  const convRate = (rrCount > 0 && vCount != null) ? vCount / rrCount : null;
+  // Conversão histórica reunião realizada → vendas (jan até hoje)
+  const histConv = context.histConv;
+  const convRate = histConv?.convRate ?? null;
   const receitaProjetada = convRate != null ? pipeline * convRate : null;
 
   return [
@@ -578,7 +639,15 @@ export function computeStageData(tabKey, deals, context = {}) {
     case 'proposta': {
       const kpis = deals.length ? propostaKpis(deals, context) : emptyResult('proposta').kpis;
       const donut = buildDonut(deals, 'mercado', 'Distribuição por Mercado', 'Propostas por mercado');
-      const bar = deals.length ? buildAgingBar(deals, 'Aging Proposta') : null;
+      // Forecast: receita esperada nos próximos 5 dias (data_reuniao + ciclo médio)
+      const cycleData = context.cycleData || [];
+      const cycleDays = cycleData
+        .map(c => daysBetween(c.data_reuniao, c.resolution_date))
+        .filter(v => v != null);
+      const avgCycle = avg(cycleDays) ?? 12; // fallback 12 dias se sem dados históricos
+      const histConv = context.histConv;
+      const convRate = histConv?.convRate ?? null;
+      const bar = deals.length ? buildRevenueForecastBar(deals, avgCycle, convRate) : null;
       return { kpis, charts: { donut, bar } };
     }
 

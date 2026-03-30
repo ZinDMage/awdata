@@ -15,7 +15,7 @@ function getBarColor(bar, mode) {
   return bar.color;
 }
 
-export default function BarChart({ bars, title, subtitle, mode = 'default' }) {
+export default function BarChart({ bars, title, subtitle, mode = 'default', formatValue }) {
   const [mounted, setMounted] = useState(false);
   const [hoveredIndex, setHoveredIndex] = useState(null);
 
@@ -29,10 +29,8 @@ export default function BarChart({ bars, title, subtitle, mode = 'default' }) {
   }
 
   const maxValue = Math.max(...bars.map((b) => b.value));
-  const step = Math.ceil(maxValue / 4);
-  const yLabels = step > 0
-    ? Array.from({ length: 5 }, (_, i) => step * (4 - i))
-    : [4, 3, 2, 1, 0];
+  const step = maxValue > 0 ? Math.ceil(maxValue / 4) : 1;
+  const yLabels = Array.from({ length: 5 }, (_, i) => step * (4 - i));
 
   return (
     <div
@@ -51,7 +49,7 @@ export default function BarChart({ bars, title, subtitle, mode = 'default' }) {
               key={label}
               className="text-xs text-content-tertiary tabular-nums leading-none"
             >
-              {label}
+              {formatValue ? formatValue(label) : label}
             </span>
           ))}
         </div>
@@ -70,7 +68,7 @@ export default function BarChart({ bars, title, subtitle, mode = 'default' }) {
             ))}
 
             {/* Bars row */}
-            <div className="absolute inset-0 flex items-end gap-2 justify-around">
+            <div className="absolute inset-0 flex gap-2 justify-around">
               {bars.map((bar, i) => {
                 const heightPercent =
                   maxValue > 0 && bar.value > 0
@@ -80,13 +78,13 @@ export default function BarChart({ bars, title, subtitle, mode = 'default' }) {
                 return (
                   <div
                     key={bar.label}
-                    className="relative flex flex-col items-center"
+                    className="relative h-full flex flex-col justify-end items-center"
                     style={{ flex: 1 }}
                   >
                     {/* Tooltip */}
                     {hoveredIndex === i && (
-                      <div className="absolute bottom-[calc(100%+6px)] left-1/2 -translate-x-1/2 z-10 bg-surface-primary text-content-primary rounded-control px-3 py-2 text-sm shadow-lg whitespace-nowrap tabular-nums pointer-events-none">
-                        {bar.label}: {bar.value}
+                      <div className="absolute top-0 left-1/2 -translate-x-1/2 z-10 bg-surface-primary text-content-primary rounded-control px-3 py-2 text-sm shadow-lg whitespace-nowrap tabular-nums pointer-events-none">
+                        {bar.label}: {formatValue ? formatValue(bar.value) : bar.value}
                       </div>
                     )}
 

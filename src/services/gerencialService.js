@@ -294,6 +294,56 @@ export async function fetchDealDetails(dealId) {
 }
 
 /**
+ * Taxa de conversão histórica: reunião realizada → vendas (jan 2026 até hoje).
+ * Retorna { reuniaoRealizadaCount, vendasCount, convRate }.
+ */
+export async function fetchHistoricalConvRate() {
+  try {
+    const { data: deals, error } = await supabase
+      .from('crm_deals')
+      .select('id, person_email, custom_fields, status')
+      .gte('deal_created_at', DATA_START_DATE);
+
+    if (error) throw error;
+    if (!deals?.length) return { reuniaoRealizadaCount: 0, vendasCount: 0, convRate: null };
+
+    let reuniaoReal = 0;
+    for (const deal of deals) {
+      const cf = parseCustomFields(deal.custom_fields);
+      const isSQL = cf[CUSTOM_FIELDS.SQL_FLAG.key] == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+      const rrFlag = cf[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
+      if (isSQL && rrFlag) reuniaoReal++;
+    }
+
+    // Vendas: via tabela sales (join por email)
+    const dealEmails = deals
+      .map(d => d.person_email?.trim()?.toLowerCase())
+      .filter(Boolean);
+
+    let vendasCount = 0;
+    if (dealEmails.length > 0) {
+      const { data: salesData } = await supabase
+        .from('sales')
+        .select('email_pipedrive')
+        .in('email_pipedrive', [...new Set(dealEmails)])
+        .gte('data_fechamento', DATA_START_DATE);
+
+      const salesEmails = new Set((salesData || []).map(s => s.email_pipedrive?.trim()?.toLowerCase()).filter(Boolean));
+      vendasCount = deals.filter(d => {
+        const email = d.person_email?.trim()?.toLowerCase();
+        return email && salesEmails.has(email);
+      }).length;
+    }
+
+    const convRate = reuniaoReal > 0 ? vendasCount / reuniaoReal : null;
+    return { reuniaoRealizadaCount: reuniaoReal, vendasCount, convRate };
+  } catch (err) {
+    console.error('[gerencialService] fetchHistoricalConvRate error:', err);
+    return { reuniaoRealizadaCount: 0, vendasCount: 0, convRate: null };
+  }
+}
+
+/**
  * Soma spend das tabelas de ads (google + meta + linkedin) a partir de 2026.
  * Retorna número (total em reais).
  */

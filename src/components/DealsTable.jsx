@@ -13,6 +13,8 @@ export default function DealsTable({ columns = [], rows = [], onRowClick, title,
   const [activeFilters, setActiveFilters] = useState({});
   const [filterOpen, setFilterOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [sortKey, setSortKey] = useState(null);
+  const [sortDir, setSortDir] = useState('asc');
 
   // Debounced search via controlled input + useMemo filtering
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -62,8 +64,24 @@ export default function DealsTable({ columns = [], rows = [], onRowClick, title,
       }
     }
 
+    // Sorting
+    if (sortKey) {
+      result.sort((a, b) => {
+        let va = a[sortKey] ?? '';
+        let vb = b[sortKey] ?? '';
+        // Numeric comparison
+        if (typeof va === 'number' && typeof vb === 'number') {
+          return sortDir === 'asc' ? va - vb : vb - va;
+        }
+        // String/date comparison
+        va = String(va);
+        vb = String(vb);
+        return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+      });
+    }
+
     return result;
-  }, [rows, debouncedQuery, textKeys, activeFilters]);
+  }, [rows, debouncedQuery, textKeys, activeFilters, sortKey, sortDir]);
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
@@ -93,6 +111,16 @@ export default function DealsTable({ columns = [], rows = [], onRowClick, title,
     () => columns.filter(c => c.filterable),
     [columns]
   );
+
+  const handleSort = useCallback((key) => {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+    setCurrentPage(1);
+  }, [sortKey]);
 
   const handleFilterToggle = useCallback((key, value) => {
     setActiveFilters(prev => {
@@ -181,9 +209,15 @@ export default function DealsTable({ columns = [], rows = [], onRowClick, title,
                   <th
                     key={col.key}
                     scope="col"
-                    className="text-xs font-medium text-content-tertiary uppercase tracking-wider px-4 py-3 border-b border-border-subtle/20 text-left"
+                    className="text-xs font-medium text-content-tertiary uppercase tracking-wider px-4 py-3 border-b border-border-subtle/20 text-left cursor-pointer select-none hover:text-content-primary transition-colors"
+                    onClick={() => handleSort(col.key)}
                   >
-                    {col.label}
+                    <span className="inline-flex items-center gap-1">
+                      {col.label}
+                      {sortKey === col.key && (
+                        <span className="text-info">{sortDir === 'asc' ? '↑' : '↓'}</span>
+                      )}
+                    </span>
                   </th>
                 ))}
               </tr>

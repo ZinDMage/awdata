@@ -39,6 +39,9 @@ export const CUSTOM_FIELDS = {
   PROPOSTA_FEITA: {          // FR73
     key: '26c88933a05e407979e117dfed02c95e8e781770'
   },
+  DATA_PROPOSTA: {
+    key: 'fd1fa603cc3094f12eba1ecc42161fbb94800771'
+  },
   OBJECOES_POS_CONTATO: {    // FR74
     key: 'e9d84f444976c291b76f78c941a266f8d760bd0c'
   },

@@ -3,7 +3,7 @@ import { useGerencial } from '@/contexts/GerencialContext';
 import { STAGE_TABS, STAGE_IDS, FUNNEL_LABELS, CUSTOM_FIELDS, parseCustomFields } from '@/config/pipedrive';
 import { getTabColumns } from '@/config/gerencialTabs';
 import { computeStageData } from '@/utils/stageMetrics';
-import { fetchAdSpend, fetchPropostaCycleData, fetchMqlContext, fetchSqlContext } from '@/services/gerencialService';
+import { fetchAdSpend, fetchPropostaCycleData, fetchHistoricalConvRate, fetchMqlContext, fetchSqlContext } from '@/services/gerencialService';
 import { classifyLead } from '@/services/classificationService';
 import BowtieChart from './BowtieChart';
 import StageTabBar from './StageTabBar';
@@ -140,6 +140,7 @@ function StageViewWithData({ activeTab, deals, bowtieStages }) {
       _cf: cf,
       data_qualificacao: d.data_qualificacao ?? cf[CUSTOM_FIELDS.DATA_QUALIFICACAO.key] ?? null,
       data_reuniao: d.data_reuniao ?? cf[CUSTOM_FIELDS.DATA_REUNIAO.key] ?? null,
+      data_proposta: cf[CUSTOM_FIELDS.DATA_PROPOSTA.key] ?? null,
       sql_flag_label: SQL_FLAG_LABELS[sqlFlagVal] ?? '—',
       reuniao_realizada_label: cf[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM ? 'Sim' : 'Não',
       tem_reuniao: (d.data_reuniao ?? cf[CUSTOM_FIELDS.DATA_REUNIAO.key]) ? 'Sim' : 'Não',
@@ -163,16 +164,16 @@ function StageViewWithData({ activeTab, deals, bowtieStages }) {
     return enrichedDeals;
   }, [activeTab, enrichedDeals]);
 
-  // Proposta: fetch adSpend e cycleData
-  const [propostaContext, setPropostaContext] = useState({ adSpend: null, cycleData: [] });
+  // Proposta: fetch adSpend, cycleData e conversão histórica
+  const [propostaContext, setPropostaContext] = useState({ adSpend: null, cycleData: [], histConv: null });
   useEffect(() => {
     if (activeTab !== 'proposta') return;
     let cancelled = false;
-    Promise.all([fetchAdSpend(), fetchPropostaCycleData()]).then(([adSpend, cycleData]) => {
-      if (!cancelled) setPropostaContext({ adSpend, cycleData });
+    Promise.all([fetchAdSpend(), fetchPropostaCycleData(), fetchHistoricalConvRate()]).then(([adSpend, cycleData, histConv]) => {
+      if (!cancelled) setPropostaContext({ adSpend, cycleData, histConv });
     }).catch(err => {
       console.error('[GerencialView] proposta context fetch error:', err);
-      if (!cancelled) setPropostaContext({ adSpend: null, cycleData: [] });
+      if (!cancelled) setPropostaContext({ adSpend: null, cycleData: [], histConv: null });
     });
     return () => { cancelled = true; };
   }, [activeTab]);
