@@ -226,16 +226,14 @@ export async function fetchStageDeals(stageIds, funnel, tabKey) {
  */
 export async function fetchPillCounts(funnel) {
   try {
-    let query = supabase
-      .from('crm_deals')
-      .select('stage_id, status, person_email, person_phone, custom_fields')
-      .eq('status', 'open')
-      .gte('deal_created_at', DATA_START_DATE);
-
-    query = applyFunnelFilter(query, funnel);
-
-    const { data: deals, error } = await query;
-    if (error) throw error;
+    const deals = await paginatedQuery(() => {
+      let q = supabase
+        .from('crm_deals')
+        .select('stage_id, status, person_email, person_phone, custom_fields')
+        .eq('status', 'open')
+        .gte('deal_created_at', DATA_START_DATE);
+      return applyFunnelFilter(q, funnel);
+    });
 
     const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
@@ -243,35 +241,36 @@ export async function fetchPillCounts(funnel) {
     const reuniaoRealizadaKey = CUSTOM_FIELDS.REUNIAO_REALIZADA.key;
     const reuniaoRealizadaSim = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
 
-    const counts = {};
-    for (const key of Object.keys(STAGE_TABS)) {
-      counts[key] = 0;
-    }
+    // Usar STAGE_IDS (mesma fonte do ForecastPanel) em vez de STAGE_TABS
+    const stageMap = [
+      { key: 'mql', ids: new Set(STAGE_IDS.MQL) },
+      { key: 'sql', ids: new Set(STAGE_IDS.SQL) },
+      { key: 'reuniao', ids: new Set(STAGE_IDS.REUNIAO_AGENDADA) },
+      { key: 'proposta', ids: new Set(STAGE_IDS.PROPOSTA) },
+      { key: 'contrato', ids: new Set(STAGE_IDS.CONTRATO_ENVIADO) },
+    ];
 
-    let unmatched = 0;
-    for (const deal of (deals || [])) {
-      let matched = false;
-      for (const [key, tab] of Object.entries(STAGE_TABS)) {
-        if (tab.stageIds.includes(deal.stage_id)) {
-          const cf = parseCustomFields(deal.custom_fields);
-          const isSQL = cf[sqlKey] == sqlSimVal;
-          const hasEmailPhone = !!(deal.person_email?.trim() && deal.person_phone?.trim());
-          const hasDataReuniao = !!cf[reuniaoKey];
-          const reuniaoRealizada = cf[reuniaoRealizadaKey] == reuniaoRealizadaSim;
+    const counts = { mql: 0, sql: 0, reuniao: 0, proposta: 0, contrato: 0, perda: 0, resultado: 0 };
 
-          // Mesmos filtros do ForecastPanel
-          if (key === 'sql' && !(hasEmailPhone && isSQL)) break;
-          if (key === 'reuniao' && !(isSQL && hasDataReuniao)) break;
-          if (key === 'proposta' && !(isSQL && reuniaoRealizada)) break;
+    for (const deal of deals) {
+      const cf = parseCustomFields(deal.custom_fields);
+      const isSQL = cf[sqlKey] == sqlSimVal;
+      const hasEmailPhone = !!(deal.person_email?.trim() && deal.person_phone?.trim());
+      const hasDataReuniao = !!cf[reuniaoKey];
+      const reuniaoRealizada = cf[reuniaoRealizadaKey] == reuniaoRealizadaSim;
 
-          counts[key]++;
-          matched = true;
-          break;
-        }
+      for (const group of stageMap) {
+        if (!group.ids.has(deal.stage_id)) continue;
+
+        // Mesmos filtros do ForecastPanel
+        if (group.key === 'sql' && !(hasEmailPhone && isSQL)) break;
+        if (group.key === 'reuniao' && !(isSQL && hasDataReuniao)) break;
+        if (group.key === 'proposta' && !(isSQL && reuniaoRealizada)) break;
+
+        counts[group.key]++;
+        break;
       }
-      if (!matched) unmatched++;
     }
-    if (unmatched > 0) console.warn(`[fetchPillCounts] ${unmatched} deals sem stage_tab match`);
 
     // perda e resultado: contagens separadas por status (com filtro de funil)
     let lostQuery = supabase

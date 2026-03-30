@@ -286,7 +286,7 @@ export default function GerencialView() {
     }, 200);
   }, [setActiveTab]);
 
-  // Montar array de tabs com contagens
+  // Montar array de tabs com contagens (mesmos números do ForecastPanel)
   const tabs = useMemo(() => {
     return TAB_DEFS.map(def => ({
       ...def,
