@@ -229,7 +229,7 @@ export async function fetchPillCounts(funnel) {
     const deals = await paginatedQuery(() => {
       let q = supabase
         .from('crm_deals')
-        .select('stage_id, status, person_email, person_phone, custom_fields')
+        .select('id, stage_id, status, person_email, person_phone, custom_fields')
         .eq('status', 'open')
         .gte('deal_created_at', DATA_START_DATE);
       return applyFunnelFilter(q, funnel);
@@ -252,6 +252,16 @@ export async function fetchPillCounts(funnel) {
 
     const counts = { mql: 0, sql: 0, reuniao: 0, proposta: 0, contrato: 0, perda: 0, resultado: 0 };
 
+    // MQL: enriquecer + classifyLead (mesma regra da aba MQL e ForecastPanel)
+    const mqlIds = new Set(STAGE_IDS.MQL);
+    const mqlDeals = deals.filter(d => mqlIds.has(d.stage_id));
+    const enrichedMql = await resolveBatch(mqlDeals, supabase);
+    const classifiedMqlIds = new Set(
+      enrichedMql
+        .filter(d => classifyLead(d.faturamento_anual, d.volume_mensal, d.segmento, d.mercado) === 'MQL')
+        .map(d => d.id)
+    );
+
     for (const deal of deals) {
       const cf = parseCustomFields(deal.custom_fields);
       const isSQL = cf[sqlKey] == sqlSimVal;
@@ -263,6 +273,7 @@ export async function fetchPillCounts(funnel) {
         if (!group.ids.has(deal.stage_id)) continue;
 
         // Mesmos filtros do ForecastPanel
+        if (group.key === 'mql' && !classifiedMqlIds.has(deal.id)) break;
         if (group.key === 'sql' && !(hasEmailPhone && isSQL)) break;
         if (group.key === 'reuniao' && !(isSQL && hasDataReuniao)) break;
         if (group.key === 'proposta' && !(isSQL && reuniaoRealizada)) break;
@@ -672,9 +683,20 @@ export async function fetchForecastData(funnel, startMonth, endMonth) {
       d._isWon = d.status === 'won' || (d.person_email && wonEmailSet.has(d.person_email.trim().toLowerCase()));
     }
 
-    // 4. Contagens por milestone (cumulativas)
+    // 4. Classificação MQL: enriquecer deals em stage MQL com resolveBatch + classifyLead
+    const mqlStageIds = new Set(STAGE_IDS.MQL);
+    const mqlStageDeals = deals.filter(d => mqlStageIds.has(d.stage_id) && d.status === 'open');
+    const enrichedMql = await resolveBatch(mqlStageDeals, supabase);
+    const classifiedMqlIds = new Set(
+      enrichedMql
+        .filter(d => classifyLead(d.faturamento_anual, d.volume_mensal, d.segmento, d.mercado) === 'MQL')
+        .map(d => d.id)
+    );
+
+    // 5. Contagens por milestone (cumulativas)
     // Funil: MQL → SQL → Reunião → Proposta → Venda → Contrato
-    const total = deals.length;
+    // MQL: apenas deals que passam na classificação classifyLead
+    const total = deals.filter(d => !mqlStageIds.has(d.stage_id) || classifiedMqlIds.has(d.id)).length;
     const sqlCount = deals.filter(d => d._isSQL).length;
     const reuniaoCount = deals.filter(d => d._isSQL && d._dataReuniao).length;
     const propostaCount = deals.filter(d => d._isSQL && d._dataProposta).length;
@@ -768,8 +790,11 @@ export async function fetchForecastData(funnel, startMonth, endMonth) {
     const stages = stageGroups.map((group) => {
       let stageDeals = openDeals.filter(d => group.ids.has(d.stage_id));
 
-      // Mesmos filtros do CSV por etapa
-      if (group.key === 'sql') {
+      // Mesmos filtros por etapa
+      if (group.key === 'mql') {
+        // MQL: apenas deals que passam na classificação classifyLead
+        stageDeals = stageDeals.filter(d => classifiedMqlIds.has(d.id));
+      } else if (group.key === 'sql') {
         // SQL: apenas deals com email + telefone + SQL?=Sim
         stageDeals = stageDeals.filter(d => d._hasEmailAndPhone && d._isSQL);
       } else if (group.key === 'reuniao') {
