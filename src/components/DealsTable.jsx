@@ -8,6 +8,34 @@ const PAGE_SIZE = 15;
  * Tabela genérica com busca, filtro avançado, paginação e colunas dinâmicas.
  * Props-only, zero Context direto. (FR61, FR62, FR63, UX-DR24)
  */
+/** Gera e baixa um CSV a partir das colunas e rows visíveis */
+function exportCSV(columns, rows, filename = 'deals-export.csv') {
+  if (!rows.length) return;
+  const headers = columns.map(c => c.label);
+  const csvRows = [
+    headers.join(';'),
+    ...rows.map(row =>
+      columns.map(col => {
+        const val = row[col.key];
+        if (val == null) return '—';
+        const str = String(val);
+        // Escapar campos com ; ou "
+        if (str.includes(';') || str.includes('"') || str.includes('\n')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      }).join(';')
+    ),
+  ];
+  const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function DealsTable({ columns = [], rows = [], onRowClick, title, subtitle }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilters, setActiveFilters] = useState({});
@@ -155,6 +183,15 @@ export default function DealsTable({ columns = [], rows = [], onRowClick, title,
           aria-label="Buscar deals"
           className="bg-surface-tertiary rounded-control px-4 py-2 text-sm text-content-primary placeholder:text-content-tertiary flex-1 outline-none focus:ring-1 focus:ring-info/40"
         />
+        {filteredRows.length > 0 && (
+          <button
+            onClick={() => exportCSV(columns, filteredRows, `${(title || 'deals').replace(/\s+/g, '-').toLowerCase()}.csv`)}
+            className="px-3 py-2 text-xs font-medium rounded-lg border border-border-subtle/30 bg-surface-tertiary text-content-secondary hover:bg-surface-tertiary/80 hover:text-content-primary transition-colors whitespace-nowrap"
+            title="Exportar CSV"
+          >
+            Extrair Base
+          </button>
+        )}
         {filterableColumns.length > 0 && (
           <div className="relative">
             <button
