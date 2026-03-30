@@ -24,9 +24,10 @@ export { PIPELINE_FUNNELS, FUNNEL_LABELS };
 
 // Active funnel configuration (FR11, FR26, FR27, AD-4)
 export const FUNNEL_CONFIG = {
-  inbound:   { label: 'Inbound',    pipelines: PIPELINE_FUNNELS.inbound,   hasSpending: true },
-  indicacao: { label: 'Indicação',  pipelines: PIPELINE_FUNNELS.indicacao, hasSpending: false },
-  wordwild:  { label: 'Word Wild',  pipelines: PIPELINE_FUNNELS.wordwild,  hasSpending: false },
+  inbound:        { label: 'Inbound',          pipelines: PIPELINE_FUNNELS.inbound,        hasSpending: true },
+  indicacao:      { label: 'Indicação',        pipelines: PIPELINE_FUNNELS.indicacao,      hasSpending: false },
+  wordwild:       { label: 'Word Wild',        pipelines: PIPELINE_FUNNELS.wordwild,       hasSpending: false },
+  revenueleakage: { label: 'Revenue Leakage',  pipelines: PIPELINE_FUNNELS.revenueleakage, hasSpending: false },
 };
 
 export const fetchMonthlyMetrics = async () => {

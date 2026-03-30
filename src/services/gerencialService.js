@@ -2,7 +2,10 @@ import { supabase } from './supabaseClient';
 import { STAGE_TABS, STAGE_IDS, CUSTOM_FIELDS, PIPELINE_FUNNELS, parseCustomFields } from '@/config/pipedrive';
 import { resolveBatch } from '@/utils/dataPrecedence';
 import { classifyLead } from '@/services/classificationService';
-import { normalizeEmail, deduplicateYayforms } from '@/services/fetchService';
+import { normalizeEmail, deduplicateYayforms, fetchAll } from '@/services/fetchService';
+
+// ── Data mínima: só trabalhamos com dados a partir de 2026 ──
+const DATA_START_DATE = '2026-01-01';
 
 // ── Bowtie funnel stages (7 stages, cumulative progression) ──
 const BOWTIE_STAGES = [
@@ -75,6 +78,7 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
       const nonInboundPipelines = [
         ...(PIPELINE_FUNNELS.indicacao || []),
         ...(PIPELINE_FUNNELS.wordwild || []),
+        ...(PIPELINE_FUNNELS.revenueleakage || []),
       ];
       const nonInboundDeals = deals.filter(d => nonInboundPipelines.includes(d.pipeline_id));
       counts.lead += nonInboundDeals.length;
@@ -179,6 +183,9 @@ export async function fetchStageDeals(stageIds, funnel, tabKey) {
       query = query.eq('status', 'open').in('stage_id', stageIds);
     }
 
+    // Filtro temporal: apenas dados a partir de 2026
+    query = query.gte('deal_created_at', DATA_START_DATE);
+
     query = applyFunnelFilter(query, funnel);
 
     const { data: deals, error } = await query;
@@ -201,7 +208,8 @@ export async function fetchPillCounts(funnel) {
     let query = supabase
       .from('crm_deals')
       .select('stage_id, status')
-      .eq('status', 'open');
+      .eq('status', 'open')
+      .gte('deal_created_at', DATA_START_DATE);
 
     query = applyFunnelFilter(query, funnel);
 
@@ -231,13 +239,15 @@ export async function fetchPillCounts(funnel) {
     let lostQuery = supabase
       .from('crm_deals')
       .select('id', { count: 'exact', head: true })
-      .eq('status', 'lost');
+      .eq('status', 'lost')
+      .gte('deal_created_at', DATA_START_DATE);
     lostQuery = applyFunnelFilter(lostQuery, funnel);
 
     let wonQuery = supabase
       .from('crm_deals')
       .select('id', { count: 'exact', head: true })
-      .eq('status', 'won');
+      .eq('status', 'won')
+      .gte('deal_created_at', DATA_START_DATE);
     wonQuery = applyFunnelFilter(wonQuery, funnel);
 
     const [{ count: lostCount }, { count: wonCount }] = await Promise.all([lostQuery, wonQuery]);
@@ -280,6 +290,209 @@ export async function fetchDealDetails(dealId) {
   } catch (err) {
     console.error('[gerencialService] fetchDealDetails error:', err);
     return { transitions: [], calls: [], tasks: [] };
+  }
+}
+
+/**
+ * Soma spend das tabelas de ads (google + meta + linkedin) a partir de 2026.
+ * Retorna número (total em reais).
+ */
+export async function fetchAdSpend() {
+  try {
+    const queries = [
+      supabase.from('google_ads_costs').select('spend').gte('date', DATA_START_DATE),
+      supabase.from('meta_ads_costs').select('spend').gte('date', DATA_START_DATE),
+    ];
+
+    // linkedin_ads_costs: catch graceful se não existir
+    const linkedinPromise = supabase.from('linkedin_ads_costs').select('spend').gte('date', DATA_START_DATE)
+      .then(res => res)
+      .catch(() => ({ data: null }));
+    queries.push(linkedinPromise);
+
+    const results = await Promise.all(queries);
+
+    let total = 0;
+    for (const { data } of results) {
+      if (!data) continue;
+      for (const row of data) {
+        const v = Number(row.spend);
+        if (!isNaN(v)) total += v;
+      }
+    }
+
+    return total;
+  } catch (err) {
+    console.error('[gerencialService] fetchAdSpend error:', err);
+    return null;
+  }
+}
+
+/**
+ * Busca dados para cálculo do ciclo médio de proposta.
+ * Retorna deals com data_reuniao + data de resolução:
+ *   Won/Open: data_fechamento (sales, join por email)
+ *   Lost: close_time (crm_deals)
+ * Deals sem data de resolução são excluídos.
+ */
+export async function fetchPropostaCycleData() {
+  try {
+    // Buscar deals a partir de 2026 com custom_fields (para extrair data_reuniao e SQL_FLAG)
+    const { data: deals, error } = await supabase
+      .from('crm_deals')
+      .select('id, status, person_email, custom_fields, close_time')
+      .gte('deal_created_at', DATA_START_DATE);
+    if (error) throw error;
+    if (!deals?.length) return [];
+
+    // Filtrar: SQL_FLAG=SIM e data_reuniao preenchida
+    const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
+    const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
+
+    const qualified = deals.filter(d => {
+      const cf = parseCustomFields(d.custom_fields);
+      return cf[sqlKey] == sqlSimVal && cf[reuniaoKey];
+    }).map(d => {
+      const cf = parseCustomFields(d.custom_fields);
+      return {
+        ...d,
+        data_reuniao: cf[reuniaoKey],
+        person_email: d.person_email?.trim()?.toLowerCase() || null,
+      };
+    });
+
+    if (!qualified.length) return [];
+
+    // Buscar sales a partir de 2026 para join por email (won + open)
+    const emails = [...new Set(qualified.map(d => d.person_email).filter(Boolean))];
+    let salesByEmail = {};
+    if (emails.length) {
+      const { data: salesData } = await supabase
+        .from('sales')
+        .select('email_pipedrive, email_stripe, data_fechamento')
+        .gte('data_fechamento', DATA_START_DATE)
+        .order('data_fechamento', { ascending: false });
+      if (salesData) {
+        for (const s of salesData) {
+          const ep = s.email_pipedrive?.trim()?.toLowerCase();
+          const es = s.email_stripe?.trim()?.toLowerCase();
+          // Primeiro encontrado = mais recente (ordenado desc), não sobrescreve
+          if (ep && s.data_fechamento && !salesByEmail[ep]) salesByEmail[ep] = s.data_fechamento;
+          if (es && s.data_fechamento && !salesByEmail[es]) salesByEmail[es] = s.data_fechamento;
+        }
+      }
+    }
+
+    // Construir pares { data_reuniao, resolution_date }
+    const cycleData = [];
+    for (const d of qualified) {
+      if (d.status === 'lost') {
+        // Lost: usar close_time
+        if (d.close_time) {
+          cycleData.push({ data_reuniao: d.data_reuniao, resolution_date: d.close_time });
+        }
+      } else {
+        // Won + Open: usar data_fechamento da sales
+        const fechamento = d.person_email ? salesByEmail[d.person_email] : null;
+        if (fechamento) {
+          cycleData.push({ data_reuniao: d.data_reuniao, resolution_date: fechamento });
+        }
+      }
+    }
+
+    return cycleData;
+  } catch (err) {
+    console.error('[gerencialService] fetchPropostaCycleData error:', err);
+    return [];
+  }
+}
+
+/**
+ * Contexto MQL: contagens do yayforms a partir de 2026 (paginado) + match com CRM.
+ * Retorna { totalLeads, totalMql, mqlsNotInPipe }.
+ */
+export async function fetchMqlContext() {
+  try {
+    // Buscar yayforms a partir de 2026 (paginado, normalizado, deduplicado)
+    const { data: yayDataRaw } = await fetchAll(
+      'yayforms_responses',
+      'lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market, created_at, submitted_at'
+    );
+    const yayData = (yayDataRaw || []).filter(r => r.submitted_at >= DATA_START_DATE);
+    if (!yayData.length) return { totalLeads: 0, totalMql: 0, mqlsNotInPipe: 0 };
+
+    const totalLeads = yayData.length;
+
+    // Classificar MQLs
+    const mqls = yayData.filter(l =>
+      classifyLead(l.lead_revenue_range, l.lead_monthly_volume, l.lead_segment, l.lead_market) === 'MQL'
+    );
+    const totalMql = mqls.length;
+
+    // Match com CRM emails para contar MQLs sem Pipedrive (a partir de 2026)
+    const { data: crmDeals } = await supabase
+      .from('crm_deals')
+      .select('person_email')
+      .gte('deal_created_at', DATA_START_DATE);
+    const crmEmails = new Set(
+      (crmDeals || []).map(d => normalizeEmail(d.person_email)).filter(Boolean)
+    );
+
+    const mqlsNotInPipe = mqls.filter(l => !l.lead_email || !crmEmails.has(l.lead_email)).length;
+
+    // Tempo médio de conclusão do formulário (created_at → submitted_at)
+    const completionMs = yayData
+      .map(l => {
+        if (!l.created_at || !l.submitted_at) return null;
+        const created = new Date(l.created_at).getTime();
+        const submitted = new Date(l.submitted_at).getTime();
+        if (isNaN(created) || isNaN(submitted) || submitted <= created) return null;
+        return submitted - created;
+      })
+      .filter(v => v != null);
+    const avgCompletionMs = completionMs.length
+      ? completionMs.reduce((a, b) => a + b, 0) / completionMs.length
+      : null;
+    const avgCompletionMin = avgCompletionMs != null ? avgCompletionMs / 60000 : null;
+
+    return { totalLeads, totalMql, mqlsNotInPipe, avgCompletionMin };
+  } catch (err) {
+    console.error('[gerencialService] fetchMqlContext error:', err);
+    return { totalLeads: 0, totalMql: 0, mqlsNotInPipe: 0 };
+  }
+}
+
+/**
+ * Contexto SQL: contagens de MQLs (yayforms) e SQLs (crm_deals SQL_FLAG=SIM) a partir de 2026.
+ * Retorna { totalMql, totalSql }.
+ */
+export async function fetchSqlContext() {
+  try {
+    // Total MQLs a partir de 2026 (yayforms)
+    const { data: yayDataRaw } = await fetchAll(
+      'yayforms_responses',
+      'lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market, submitted_at'
+    );
+    const totalMql = (yayDataRaw || []).filter(l =>
+      l.submitted_at >= DATA_START_DATE &&
+      classifyLead(l.lead_revenue_range, l.lead_monthly_volume, l.lead_segment, l.lead_market) === 'MQL'
+    ).length;
+
+    // Total SQLs a partir de 2026 (deals com SQL_FLAG=SIM) — paginado
+    const { data: deals } = await fetchAll('crm_deals', 'custom_fields, deal_created_at');
+    const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
+    const totalSql = (deals || []).filter(d => {
+      if (d.deal_created_at < DATA_START_DATE) return false;
+      const cf = parseCustomFields(d.custom_fields);
+      return cf[sqlKey] == sqlSimVal;
+    }).length;
+
+    return { totalMql, totalSql };
+  } catch (err) {
+    console.error('[gerencialService] fetchSqlContext error:', err);
+    return { totalMql: 0, totalSql: 0 };
   }
 }
 

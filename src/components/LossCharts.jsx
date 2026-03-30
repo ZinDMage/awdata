@@ -68,7 +68,7 @@ export default function LossCharts({ aggData }) {
                       >
                         <div className="flex justify-between items-center mb-1">
                           <span className="text-sm text-content-secondary truncate max-w-[160px]" title={item.m}>{item.m}</span>
-                          <span className="text-sm font-semibold text-content-primary tabular-nums">{item.p}%</span>
+                          <span className="text-sm font-semibold text-content-primary tabular-nums">{item.c ?? '—'} ({item.p}%)</span>
                         </div>
                         <LossBar pct={item.p} color={etapa.color} />
                       </div>

@@ -1,8 +1,10 @@
-import { useMemo, useCallback, useState, useRef } from 'react';
+import { useMemo, useCallback, useState, useRef, useEffect } from 'react';
 import { useGerencial } from '@/contexts/GerencialContext';
-import { STAGE_TABS, STAGE_IDS, FUNNEL_LABELS } from '@/config/pipedrive';
+import { STAGE_TABS, STAGE_IDS, FUNNEL_LABELS, CUSTOM_FIELDS, parseCustomFields } from '@/config/pipedrive';
 import { getTabColumns } from '@/config/gerencialTabs';
 import { computeStageData } from '@/utils/stageMetrics';
+import { fetchAdSpend, fetchPropostaCycleData, fetchMqlContext, fetchSqlContext } from '@/services/gerencialService';
+import { classifyLead } from '@/services/classificationService';
 import BowtieChart from './BowtieChart';
 import StageTabBar from './StageTabBar';
 import StageView from './StageView';
@@ -124,29 +126,115 @@ function BowtieFilters({ bowtiePeriod, selectedFunnel, onPeriodChange, onFunnelC
 }
 
 // ── StageView com dados computados ──
-function StageViewWithData({ activeTab, deals }) {
+function StageViewWithData({ activeTab, deals, bowtieStages }) {
   const configKey = TAB_TO_CONFIG[activeTab] || activeTab;
   const columns = getTabColumns(configKey);
-  const { kpis, charts } = useMemo(() => computeStageData(activeTab, deals), [activeTab, deals]);
+
+  // Flatten custom fields onto deals for table columns (data_qualificacao, data_reuniao, sql_flag_label)
+  const SQL_FLAG_LABELS = { [CUSTOM_FIELDS.SQL_FLAG.values.SIM]: 'Sim', [CUSTOM_FIELDS.SQL_FLAG.values.NAO]: 'Não', [CUSTOM_FIELDS.SQL_FLAG.values.A_REVISAR]: 'A Revisar' };
+  const enrichedDeals = useMemo(() => deals.map(d => {
+    const cf = parseCustomFields(d.custom_fields);
+    const sqlFlagVal = cf[CUSTOM_FIELDS.SQL_FLAG.key];
+    return {
+      ...d,
+      _cf: cf,
+      data_qualificacao: d.data_qualificacao ?? cf[CUSTOM_FIELDS.DATA_QUALIFICACAO.key] ?? null,
+      data_reuniao: d.data_reuniao ?? cf[CUSTOM_FIELDS.DATA_REUNIAO.key] ?? null,
+      sql_flag_label: SQL_FLAG_LABELS[sqlFlagVal] ?? '—',
+      reuniao_realizada_label: cf[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM ? 'Sim' : 'Não',
+      tem_reuniao: (d.data_reuniao ?? cf[CUSTOM_FIELDS.DATA_REUNIAO.key]) ? 'Sim' : 'Não',
+    };
+  }), [deals]);
+
+  // Filtros por aba
+  const filteredDeals = useMemo(() => {
+    // MQL: filtrar apenas deals que passam na classificação
+    if (activeTab === 'mql') {
+      return enrichedDeals.filter(d =>
+        classifyLead(d.faturamento_anual, d.volume_mensal, d.segmento, d.mercado) === 'MQL'
+      );
+    }
+    // SQL/Reunião/Proposta: SQL_FLAG=SIM
+    if (activeTab === 'sql' || activeTab === 'reuniao' || activeTab === 'proposta') {
+      const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
+      const sqlSim = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+      return enrichedDeals.filter(d => d._cf?.[sqlKey] == sqlSim);
+    }
+    return enrichedDeals;
+  }, [activeTab, enrichedDeals]);
+
+  // Proposta: fetch adSpend e cycleData
+  const [propostaContext, setPropostaContext] = useState({ adSpend: null, cycleData: [] });
+  useEffect(() => {
+    if (activeTab !== 'proposta') return;
+    let cancelled = false;
+    Promise.all([fetchAdSpend(), fetchPropostaCycleData()]).then(([adSpend, cycleData]) => {
+      if (!cancelled) setPropostaContext({ adSpend, cycleData });
+    }).catch(err => {
+      console.error('[GerencialView] proposta context fetch error:', err);
+      if (!cancelled) setPropostaContext({ adSpend: null, cycleData: [] });
+    });
+    return () => { cancelled = true; };
+  }, [activeTab]);
+
+  // MQL: fetch contagens all-time do yayforms (paginado)
+  const [mqlContext, setMqlContext] = useState({ totalLeads: null, totalMql: null, mqlsNotInPipe: null });
+  useEffect(() => {
+    if (activeTab !== 'mql') return;
+    let cancelled = false;
+    fetchMqlContext().then(ctx => {
+      if (!cancelled) setMqlContext(ctx);
+    }).catch(err => {
+      console.error('[GerencialView] mql context fetch error:', err);
+    });
+    return () => { cancelled = true; };
+  }, [activeTab]);
+
+  // SQL: fetch contagens all-time (MQLs yayforms + SQLs CRM)
+  const [sqlContext, setSqlContext] = useState({ totalMql: null, totalSql: null });
+  useEffect(() => {
+    if (activeTab !== 'sql') return;
+    let cancelled = false;
+    fetchSqlContext().then(ctx => {
+      if (!cancelled) setSqlContext(ctx);
+    }).catch(err => {
+      console.error('[GerencialView] sql context fetch error:', err);
+    });
+    return () => { cancelled = true; };
+  }, [activeTab]);
+
+  // Context cross-tab: contagens do Bowtie (Lead, MQL) para KPIs de %
+  const context = useMemo(() => ({
+    leadCount: bowtieStages?.[0]?.count ?? null,
+    mqlCount:  bowtieStages?.[1]?.count ?? null,
+    sqlCount:  bowtieStages?.[2]?.count ?? null,
+    reuniaoRealizadaCount: bowtieStages?.[4]?.count ?? null,
+    vendasCount:           bowtieStages?.[5]?.count ?? null,
+    ...(activeTab === 'proposta' ? propostaContext : {}),
+    ...(activeTab === 'mql' ? mqlContext : {}),
+    ...(activeTab === 'sql' ? sqlContext : {}),
+  }), [bowtieStages, activeTab, propostaContext, mqlContext, sqlContext]);
+
+  const { kpis, charts } = useMemo(() => computeStageData(activeTab, filteredDeals, context), [activeTab, filteredDeals, context]);
 
   // Reunião: dual sections (Agendada + Confirmada) — FR65
   const sections = useMemo(() => {
     if (activeTab !== 'reuniao') return null;
     const agendadaIds = new Set(STAGE_IDS.REUNIAO_AGENDADA);
-    const agendada = deals.filter(d => agendadaIds.has(d.stage_id));
-    const confirmada = deals.filter(d => !agendadaIds.has(d.stage_id));
+    const agendada = filteredDeals.filter(d => agendadaIds.has(d.stage_id));
+    const confirmada = filteredDeals.filter(d => !agendadaIds.has(d.stage_id));
     return [
       { title: 'Reunião Agendada', deals: agendada, columns: getTabColumns('reuniao_agendada') },
       { title: 'Reunião Confirmada', deals: confirmada, columns: getTabColumns('reuniao_confirmada') },
     ];
-  }, [activeTab, deals]);
+  }, [activeTab, filteredDeals]);
 
   return (
     <StageView
       kpis={kpis}
       charts={charts}
       columns={columns}
-      deals={deals}
+      deals={filteredDeals}
       sections={sections}
     />
   );
@@ -271,6 +359,7 @@ export default function GerencialView() {
               <StageViewWithData
                 activeTab={activeTab}
                 deals={tabData.data || []}
+                bowtieStages={bowtieData.data?.stages}
               />
             )}
           </>

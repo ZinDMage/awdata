@@ -6,7 +6,7 @@
 
 import { F } from '@/utils/formatters';
 import { CUSTOM_FIELDS, parseCustomFields } from '@/config/pipedrive';
-import { classifyLead } from '@/services/classificationService';
+
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -100,7 +100,8 @@ function buildDonut(deals, field, title, subtitle = '') {
   const freq = {};
   for (const d of deals) {
     const raw = d[field];
-    const v = (raw == null || String(raw).trim() === '') ? 'Outros' : raw;
+    const trimmed = raw == null ? '' : String(raw).trim();
+    const v = (trimmed === '' || /^outros?$/i.test(trimmed)) ? 'Outros' : trimmed;
     freq[v] = (freq[v] ?? 0) + 1;
   }
 
@@ -151,69 +152,63 @@ function emptyCard(icon, iconColor, label) {
 
 const STAGNATION_THRESHOLD_DAYS = 14;
 
-function mqlKpis(deals) {
+function mqlKpis(deals, context = {}) {
   const total = deals.length;
 
-  // Deals estagnados: acima do threshold de dias no stage
-  const stagnated = deals.filter(d => getDaysInStage(d) > STAGNATION_THRESHOLD_DAYS).length;
-  const stagnatedPct = total ? stagnated / total : null;
+  // Context: bowtie (período) + all-time yayforms
+  const { totalLeads, totalMql, mqlsNotInPipe, avgCompletionMin, mqlCount: mqlPeriodo } = context;
+  const mqlPct = (totalLeads != null && totalLeads > 0) ? totalMql / totalLeads : null;
 
-  // Tempo médio de resposta do formulário (time_to_complete_sec do YayForms)
-  const completionTimes = deals
-    .map(d => d.time_to_complete_sec)
-    .filter(v => v != null && !isNaN(Number(v)))
-    .map(Number);
-  const avgCompletionSec = avg(completionTimes);
-  const avgCompletionDays = avgCompletionSec != null ? avgCompletionSec / 86400 : null;
-
-  // % qualificados para MQL (usando regras de negócio classifyLead)
-  const mqlCount = deals.filter(d => {
-    return classifyLead(
-      d.faturamento_anual,
-      d.volume_mensal,
-      d.segmento,
-      d.mercado
-    ) === 'MQL';
-  }).length;
-  const mqlPct = total ? mqlCount / total : null;
+  // Formatar tempo médio de conclusão
+  let avgTimeLabel = '—';
+  let avgTimeDetail = '—';
+  if (avgCompletionMin != null) {
+    if (avgCompletionMin < 1) {
+      avgTimeLabel = `${Math.round(avgCompletionMin * 60)}s`;
+      avgTimeDetail = `${Math.round(avgCompletionMin * 60)} segundos em média`;
+    } else if (avgCompletionMin < 60) {
+      avgTimeLabel = `${Math.round(avgCompletionMin)}min`;
+      avgTimeDetail = `${avgCompletionMin.toFixed(1)} minutos em média`;
+    } else {
+      const hrs = avgCompletionMin / 60;
+      avgTimeLabel = `${hrs.toFixed(1)}h`;
+      avgTimeDetail = `${hrs.toFixed(1)} horas em média`;
+    }
+  }
 
   return [
     {
       icon: '📨', iconColor: 'info',
       label: 'Volume de Entrada',
-      value: F.n(total),
-      detail: `${total} deals open`,
-      description: 'Deals abertos em MQL',
+      value: mqlPeriodo != null ? F.n(mqlPeriodo) : F.n(total),
+      detail: mqlPeriodo != null ? `${total} deals open no pipe` : `${total} deals open`,
+      description: 'MQLs no período selecionado',
     },
     {
       icon: '⚠️', iconColor: 'warning',
-      label: 'Deals Estagnados',
-      value: F.n(stagnated),
-      detail: stagnatedPct != null ? F.p(stagnatedPct) + ' do total' : '—',
-      description: `Deals com mais de ${STAGNATION_THRESHOLD_DAYS} dias no stage`,
+      label: 'MQLs sem Pipedrive',
+      value: mqlsNotInPipe != null ? F.n(mqlsNotInPipe) : '—',
+      detail: totalMql != null && totalMql > 0 ? F.p(mqlsNotInPipe / totalMql) + ' dos MQLs' : '—',
+      description: 'Leads qualificados ainda sem deal no CRM',
     },
     {
       icon: '🕐', iconColor: 'warning',
-      label: 'Tempo Médio de Resposta',
-      value: avgCompletionDays != null
-        ? (avgCompletionDays >= 1 ? F.d(avgCompletionDays) : `${Math.round(avgCompletionSec / 3600)}h`)
-        : '—',
-      detail: avgCompletionDays != null
-        ? `${avgCompletionDays.toFixed(1)} dias em média`
-        : '—',
-      description: 'Tempo médio de preenchimento do formulário',
+      label: 'Tempo Médio Formulário',
+      value: avgTimeLabel,
+      detail: avgTimeDetail,
+      description: 'Tempo médio de conclusão (created→submitted)',
     },
     {
       icon: '📈', iconColor: 'positive',
       label: '% Qualificados MQL',
       value: mqlPct != null ? F.p(mqlPct) : '—',
-      detail: `${mqlCount} qualificados`,
-      description: 'Leads que atendem critérios MQL (faturamento + volume)',
+      detail: totalLeads != null ? `${totalMql} de ${totalLeads} leads` : '—',
+      description: 'MQLs sobre total de leads YayForms (all-time)',
     },
   ];
 }
 
-function sqlKpis(deals) {
+function sqlKpis(deals, context = {}) {
   const total = deals.length;
   const pipeline = sum(deals.map(d => d.value ?? d.deal_value ?? 0));
 
@@ -232,8 +227,12 @@ function sqlKpis(deals) {
   }).filter(v => v != null);
   const avgCycle = avg(cyclesDays);
 
-  // % MQL→SQL: use total as denominator (context: SQL tab shows SQL deals)
-  const sqlPct = total > 0 ? 1 : null; // within SQL tab all are SQL; use count vs MQL if available
+  // % MQL→SQL: all-time (totalSql / totalMql do yayforms+CRM)
+  const totalMqlAllTime = context.totalMql;
+  const totalSqlAllTime = context.totalSql;
+  const sqlPct = (totalMqlAllTime != null && totalMqlAllTime > 0 && totalSqlAllTime != null)
+    ? totalSqlAllTime / totalMqlAllTime
+    : null;
 
   return [
     {
@@ -260,9 +259,9 @@ function sqlKpis(deals) {
     {
       icon: '📈', iconColor: 'positive',
       label: '% MQL→SQL',
-      value: F.n(total),
-      detail: `${total} SQLs`,
-      description: 'Total de deals qualificados',
+      value: sqlPct != null ? F.p(sqlPct) : '—',
+      detail: totalMqlAllTime != null ? `${totalSqlAllTime} de ${totalMqlAllTime} MQLs` : '—',
+      description: 'Conversão de MQL para SQL (all-time)',
     },
   ];
 }
@@ -271,16 +270,18 @@ function reuniaoKpis(deals) {
   const total = deals.length;
   const pipeline = sum(deals.map(d => d.value ?? d.deal_value ?? 0));
 
-  // "advanced to proposta" — deals that have stage_id in proposta/contrato range
-  // We rely on a flag or stage_name; best effort: deals where stage_name includes proposta/contrato
-  const propostaNames = ['proposta', 'contrato'];
-  const advanced = deals.filter(d => {
-    const sn = String(d.stage_name ?? '').toLowerCase();
-    return propostaNames.some(p => sn.includes(p));
+  // Taxa de confirmação: REUNIAO_REALIZADA = SIM
+  const reuniaoRealizadaKey = CUSTOM_FIELDS.REUNIAO_REALIZADA.key;
+  const reuniaoSimVal = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
+  const confirmed = deals.filter(d => {
+    const cf = parseCustomFields(d.custom_fields);
+    return cf[reuniaoRealizadaKey] == reuniaoSimVal;
   }).length;
-  const progressPct = total ? advanced / total : null;
+  const confirmPct = total ? confirmed / total : null;
 
-  const avgDays = avg(deals.map(getDaysInStage));
+  // Tempo médio: data_qualificacao → data_reuniao
+  const qualReuDays = deals.map(d => daysBetween(d.data_qualificacao, d.data_reuniao)).filter(v => v != null);
+  const avgQualToReuniao = avg(qualReuDays);
 
   const maxDeal = deals.reduce((best, d) => {
     const v = d.value ?? d.deal_value ?? 0;
@@ -298,16 +299,16 @@ function reuniaoKpis(deals) {
     {
       icon: '📈', iconColor: 'positive',
       label: 'Progresso',
-      value: progressPct != null ? F.p(progressPct) : '—',
-      detail: `${advanced} avançaram para Proposta`,
-      description: 'Deals que avançaram no funil',
+      value: confirmPct != null ? F.p(confirmPct) : '—',
+      detail: `${confirmed} de ${total} confirmaram`,
+      description: 'Taxa de confirmação de reunião',
     },
     {
       icon: '🕐', iconColor: 'warning',
       label: 'Tempo Médio',
-      value: avgDays != null ? F.d(avgDays) : '—',
-      detail: avgDays != null ? `${Math.round(avgDays)} dias` : '—',
-      description: 'Média de dias no stage de Reunião',
+      value: avgQualToReuniao != null ? F.d(avgQualToReuniao) : '—',
+      detail: avgQualToReuniao != null ? `${Math.round(avgQualToReuniao)} dias em média` : '—',
+      description: 'Da qualificação até a reunião',
     },
     {
       icon: '🏆', iconColor: 'content-tertiary',
@@ -319,26 +320,38 @@ function reuniaoKpis(deals) {
   ];
 }
 
-function propostaKpis(deals) {
+function propostaKpis(deals, context = {}) {
   const total = deals.length;
   const pipeline = sum(deals.map(d => d.value ?? d.deal_value ?? 0));
   const ticket = total ? pipeline / total : null;
-  const avgDays = avg(deals.map(getDaysInStage));
+
+  // Ciclo médio histórico: data_reuniao → resolution_date (from context.cycleData)
+  const cycleData = context.cycleData || [];
+  const cycleDays = cycleData
+    .map(c => daysBetween(c.data_reuniao, c.resolution_date))
+    .filter(v => v != null);
+  const avgCycle = avg(cycleDays);
+
+  // Conversão reunião realizada → vendas (from bowtie context)
+  const rrCount = context.reuniaoRealizadaCount;
+  const vCount = context.vendasCount;
+  const convRate = (rrCount > 0 && vCount != null) ? vCount / rrCount : null;
+  const receitaProjetada = convRate != null ? pipeline * convRate : null;
 
   return [
     {
       icon: '💲', iconColor: 'info',
-      label: 'Valor Pipeline',
+      label: 'Faturamento do Pipe',
       value: F.ri(pipeline),
       detail: `${total} deals`,
       description: 'Valor total em proposta',
     },
     {
-      icon: '📊', iconColor: 'info',
-      label: 'Deals Ativos',
-      value: F.n(total),
-      detail: `${total} propostas abertas`,
-      description: 'Deals no stage de Proposta',
+      icon: '📈', iconColor: 'positive',
+      label: 'Receita Projetada',
+      value: receitaProjetada != null ? F.ri(receitaProjetada) : '—',
+      detail: convRate != null ? `${Math.round(convRate * 100)}% conv. R. Realizada` : '—',
+      description: 'Faturamento × conversão reunião realizada',
     },
     {
       icon: '💰', iconColor: 'positive',
@@ -350,9 +363,11 @@ function propostaKpis(deals) {
     {
       icon: '🕐', iconColor: 'warning',
       label: 'Ciclo Médio',
-      value: avgDays != null ? F.d(avgDays) : '—',
-      detail: avgDays != null ? `${Math.round(avgDays)} dias` : '—',
-      description: 'Média de dias em Proposta',
+      value: avgCycle != null ? F.d(avgCycle) : '—',
+      detail: avgCycle != null
+        ? `${Math.round(avgCycle)} dias (${cycleDays.length} deals)`
+        : '—',
+      description: 'Da reunião até fechamento',
     },
   ];
 }
@@ -509,10 +524,10 @@ function resultadoCharts(deals) {
 
 function emptyResult(tabKey) {
   const TAB_LABELS = {
-    mql:       ['Volume de Entrada', 'Deals Estagnados', 'Tempo Médio de Resposta', '% Qualificados'],
+    mql:       ['Volume de Entrada', 'MQLs sem Pipedrive', 'Tempo Médio Formulário', '% Qualificados MQL'],
     sql:       ['Pipeline em Avaliação', 'A Revisar', 'Tempo Médio Criação→Qualificação', '% MQL→SQL'],
     reuniao:   ['R$ Pipeline', 'Progresso', 'Tempo Médio', 'Maior Deal'],
-    proposta:  ['Valor Pipeline', 'Deals Ativos', 'Ticket Médio', 'Ciclo Médio'],
+    proposta:  ['Valor Esperado', 'Gasto em Ads', 'Ticket Médio', 'Ciclo Médio'],
     perda:     ['Total Perdido', 'Principal Motivo', 'Valor Perdido', 'Concentração'],
     resultado: ['Total Ganho', 'Receita Total', 'Ticket Médio', 'Ciclo Médio'],
   };
@@ -530,14 +545,15 @@ function emptyResult(tabKey) {
  *
  * @param {string} tabKey - One of: 'mql' | 'sql' | 'reuniao' | 'proposta' | 'perda' | 'resultado'
  * @param {Array}  deals  - Raw deal objects from Supabase/Pipedrive
+ * @param {Object} [context={}] - Cross-tab data (e.g. { leadCount, mqlCount } from Bowtie)
  * @returns {{ kpis: Array, charts: { donut: object|null, bar: object|null } }}
  */
-export function computeStageData(tabKey, deals) {
+export function computeStageData(tabKey, deals, context = {}) {
   if (!deals || !Array.isArray(deals)) return emptyResult(tabKey);
 
   switch (tabKey) {
     case 'mql': {
-      const kpis = deals.length ? mqlKpis(deals) : emptyResult('mql').kpis;
+      const kpis = deals.length ? mqlKpis(deals, context) : emptyResult('mql').kpis;
       const donut = buildDonut(deals, 'segmento', 'Distribuição por Segmento', 'MQLs por segmento');
       const revenueDonut = deals.length
         ? buildDonut(deals, 'faturamento_anual', 'Faturamento', 'Distribuição por faixa de faturamento')
@@ -546,7 +562,7 @@ export function computeStageData(tabKey, deals) {
     }
 
     case 'sql': {
-      const kpis = deals.length ? sqlKpis(deals) : emptyResult('sql').kpis;
+      const kpis = deals.length ? sqlKpis(deals, context) : emptyResult('sql').kpis;
       const donut = buildDonut(deals, 'mercado', 'Distribuição por Mercado', 'SQLs por mercado');
       const bar = deals.length ? buildAgingBar(deals, 'Aging SQL') : null;
       return { kpis, charts: { donut, bar } };
@@ -560,7 +576,7 @@ export function computeStageData(tabKey, deals) {
     }
 
     case 'proposta': {
-      const kpis = deals.length ? propostaKpis(deals) : emptyResult('proposta').kpis;
+      const kpis = deals.length ? propostaKpis(deals, context) : emptyResult('proposta').kpis;
       const donut = buildDonut(deals, 'mercado', 'Distribuição por Mercado', 'Propostas por mercado');
       const bar = deals.length ? buildAgingBar(deals, 'Aging Proposta') : null;
       return { kpis, charts: { donut, bar } };

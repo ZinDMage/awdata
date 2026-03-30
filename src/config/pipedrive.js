@@ -8,7 +8,7 @@
 export const STAGE_IDS = {
   MQL: [1, 49],
   SQL: [19, 50, 53, 35],
-  REUNIAO_AGENDADA: [3, 45, 51, 37, 55, 58],
+  REUNIAO_AGENDADA: [3, 11, 45, 51, 37, 55, 58],
   PROPOSTA: [4, 46, 39, 59],
   CONTRATO_ENVIADO: [41, 47, 40, 60],
 };
@@ -48,9 +48,10 @@ export const CUSTOM_FIELDS = {
 // AD-4: 3 funis ativos. Eventos (pipeline 4) mergeado em Indicação.
 // Clínicas despriorizado/removido.
 export const PIPELINE_FUNNELS = {
-  inbound:   [1, 3, 7, 8, 9],
-  indicacao: [10],  // 4 era Eventos, agora Indicação
-  wordwild:  [6],
+  inbound:         [1, 3, 7, 8, 9],
+  indicacao:       [10],
+  wordwild:        [6],
+  revenueleakage:  [11],
 };
 
 // ── Funnel Labels ──────────────────────────────────────────────
@@ -58,6 +59,7 @@ export const FUNNEL_LABELS = {
   inbound: '🔽 Inbound',
   indicacao: '🙋‍♂️ Indicação',
   wordwild: '🇺🇸 WD',
+  revenueleakage: '🚰 Revenue Leakage',
 };
 
 /**
@@ -89,7 +91,7 @@ export const parseCustomFields = (cf) => {
 export const STAGE_TABS = {
   mql:       { stageIds: [1, 49],                              label: 'MQL',       icon: '📨' },
   sql:       { stageIds: [19, 50, 53, 35],                     label: 'SQL',       icon: '✅' },
-  reuniao:   { stageIds: [3, 45, 51, 37, 55, 58],              label: 'Reunião',   icon: '📅' },
+  reuniao:   { stageIds: [3, 11, 45, 51, 37, 55, 58],              label: 'Reunião',   icon: '📅' },
   proposta:  { stageIds: [4, 46, 39, 59, 41, 47, 40, 60],      label: 'Proposta',  icon: '📝' },
   perda:     { stageIds: [],                                    label: 'Perda',     icon: '❌' },
   resultado: { stageIds: [],                                    label: 'Resultado', icon: '🏆' },

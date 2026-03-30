@@ -94,7 +94,7 @@ export function agr(keys, data) {
     return Object.entries(counts)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
-      .map(([m, sum]) => ({ m, p: total > 0 ? Math.round(sum * 100 / total) : 0 }));
+      .map(([m, sum]) => ({ m, p: total > 0 ? Math.round(sum * 100 / total) : 0, c: sum }));
   };
   a.perdas = {
     mql: resumePerdas(mergedPerdas.mql),
