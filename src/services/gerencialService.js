@@ -587,6 +587,8 @@ export async function fetchForecastData(funnel) {
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
     const qualKey = CUSTOM_FIELDS.DATA_QUALIFICACAO.key;
     const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
+    const reuniaoRealizadaKey = CUSTOM_FIELDS.REUNIAO_REALIZADA.key;
+    const reuniaoRealizadaSim = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
     const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
 
     const deals = allDeals.map(d => {
@@ -594,8 +596,10 @@ export async function fetchForecastData(funnel) {
       return {
         ...d,
         _isSQL: cf[sqlKey] == sqlSimVal,
+        _hasEmailAndPhone: !!(d.person_email?.trim() && d.person_phone?.trim()),
         _dataQualificacao: cf[qualKey] || null,
         _dataReuniao: cf[reuniaoKey] || null,
+        _reuniaoRealizada: cf[reuniaoRealizadaKey] == reuniaoRealizadaSim,
         _dataProposta: cf[propostaKey] || null,
       };
     });
@@ -737,7 +741,20 @@ export async function fetchForecastData(funnel) {
     ];
 
     const stages = stageGroups.map((group) => {
-      const stageDeals = openDeals.filter(d => group.ids.has(d.stage_id));
+      let stageDeals = openDeals.filter(d => group.ids.has(d.stage_id));
+
+      // Mesmos filtros do CSV por etapa
+      if (group.key === 'sql') {
+        // SQL: apenas deals com email + telefone + SQL?=Sim
+        stageDeals = stageDeals.filter(d => d._hasEmailAndPhone && d._isSQL);
+      } else if (group.key === 'reuniao') {
+        // Reunião: apenas SQL?=Sim + data_reuniao preenchida
+        stageDeals = stageDeals.filter(d => d._isSQL && d._dataReuniao);
+      } else if (group.key === 'proposta') {
+        // Proposta: apenas SQL?=Sim + Reunião Realizada=Sim
+        stageDeals = stageDeals.filter(d => d._isSQL && d._reuniaoRealizada);
+      }
+
       const count = stageDeals.length;
       const value = stageDeals.reduce((acc, d) => acc + (d.value || 0), 0);
 
