@@ -145,7 +145,7 @@ function buildAgingBar(deals, title = 'Aging') {
 
 /**
  * Build 5-day revenue forecast bar chart.
- * For each open deal, projects close date = data_reuniao + avgCycleDays.
+ * For each open deal, projects close date = data_proposta + avgCycleDays.
  * Groups expected revenue by day for the next 5 days.
  */
 function buildRevenueForecastBar(deals, avgCycleDays, convRate) {
@@ -179,7 +179,7 @@ function buildRevenueForecastBar(deals, avgCycleDays, convRate) {
   for (const b of buckets) bucketMap[b.dateKey] = b;
 
   for (const deal of deals) {
-    const propDate = deal.data_proposta ?? deal.data_reuniao;
+    const propDate = deal.data_proposta;
     if (!propDate) continue;
     // Normalize to YYYY-MM-DD (handle both ISO strings and date objects)
     const raw = String(propDate).slice(0, 10);
@@ -387,14 +387,14 @@ function propostaKpis(deals, context = {}) {
   const pipeline = sum(deals.map(d => d.value ?? d.deal_value ?? 0));
   const ticket = total ? pipeline / total : null;
 
-  // Ciclo médio histórico: data_reuniao → resolution_date (from context.cycleData)
+  // Ciclo médio histórico: data_proposta → resolution_date (retorno sobre proposta)
   const cycleData = context.cycleData || [];
   const cycleDays = cycleData
-    .map(c => daysBetween(c.data_reuniao, c.resolution_date))
+    .map(c => daysBetween(c.data_proposta, c.resolution_date))
     .filter(v => v != null);
   const avgCycle = avg(cycleDays);
 
-  // Conversão histórica reunião realizada → vendas (jan até hoje)
+  // Conversão histórica proposta → vendas (jan até hoje)
   const histConv = context.histConv;
   const convRate = histConv?.convRate ?? null;
   const receitaProjetada = convRate != null ? pipeline * convRate : null;
@@ -412,7 +412,7 @@ function propostaKpis(deals, context = {}) {
       label: 'Receita Projetada',
       value: receitaProjetada != null ? F.ri(receitaProjetada) : '—',
       detail: convRate != null ? `${Math.round(convRate * 100)}% conv. Proposta` : '—',
-      description: 'Faturamento × conversão reunião realizada',
+      description: 'Faturamento × conversão proposta → venda',
     },
     {
       icon: '💰', iconColor: 'positive',
@@ -428,7 +428,7 @@ function propostaKpis(deals, context = {}) {
       detail: avgCycle != null
         ? `${Math.round(avgCycle)} dias (${cycleDays.length} deals)`
         : '—',
-      description: 'Da reunião até fechamento',
+      description: 'Da proposta até desfecho (venda ou perda)',
     },
   ];
 }
@@ -639,10 +639,10 @@ export function computeStageData(tabKey, deals, context = {}) {
     case 'proposta': {
       const kpis = deals.length ? propostaKpis(deals, context) : emptyResult('proposta').kpis;
       const donut = buildDonut(deals, 'mercado', 'Distribuição por Mercado', 'Propostas por mercado');
-      // Forecast: receita esperada nos próximos 5 dias (data_reuniao + ciclo médio)
+      // Forecast: receita esperada nos próximos 5 dias (data_proposta + ciclo médio retorno)
       const cycleData = context.cycleData || [];
       const cycleDays = cycleData
-        .map(c => daysBetween(c.data_reuniao, c.resolution_date))
+        .map(c => daysBetween(c.data_proposta, c.resolution_date))
         .filter(v => v != null);
       const avgCycle = avg(cycleDays) ?? 12; // fallback 12 dias se sem dados históricos
       const histConv = context.histConv;

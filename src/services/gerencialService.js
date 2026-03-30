@@ -343,7 +343,7 @@ export async function fetchDealDetails(dealId) {
 
 /**
  * Taxa de conversão histórica: reunião realizada → vendas (jan 2026 até hoje).
- * Retorna { reuniaoRealizadaCount, vendasCount, convRate }.
+ * Retorna { propostaCount, vendasCount, convRate }.
  */
 export async function fetchHistoricalConvRate() {
   try {
@@ -353,18 +353,24 @@ export async function fetchHistoricalConvRate() {
       .gte('deal_created_at', DATA_START_DATE);
 
     if (error) throw error;
-    if (!deals?.length) return { reuniaoRealizadaCount: 0, vendasCount: 0, convRate: null };
+    if (!deals?.length) return { propostaCount: 0, vendasCount: 0, convRate: null };
 
-    let reuniaoReal = 0;
+    // Proposta: deals com data_proposta preenchida (base da conversão)
+    const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
+    let propostaCount = 0;
+    const propostaDeals = [];
     for (const deal of deals) {
       const cf = parseCustomFields(deal.custom_fields);
       const isSQL = cf[CUSTOM_FIELDS.SQL_FLAG.key] == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
-      const rrFlag = cf[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
-      if (isSQL && rrFlag) reuniaoReal++;
+      const hasProposta = !!cf[propostaKey];
+      if (isSQL && hasProposta) {
+        propostaCount++;
+        propostaDeals.push(deal);
+      }
     }
 
-    // Vendas: via tabela sales (join por email)
-    const dealEmails = deals
+    // Vendas: via tabela sales (join por email) — apenas deals com proposta
+    const dealEmails = propostaDeals
       .map(d => d.person_email?.trim()?.toLowerCase())
       .filter(Boolean);
 
@@ -377,17 +383,17 @@ export async function fetchHistoricalConvRate() {
         .gte('data_fechamento', DATA_START_DATE);
 
       const salesEmails = new Set((salesData || []).map(s => s.email_pipedrive?.trim()?.toLowerCase()).filter(Boolean));
-      vendasCount = deals.filter(d => {
+      vendasCount = propostaDeals.filter(d => {
         const email = d.person_email?.trim()?.toLowerCase();
         return email && salesEmails.has(email);
       }).length;
     }
 
-    const convRate = reuniaoReal > 0 ? vendasCount / reuniaoReal : null;
-    return { reuniaoRealizadaCount: reuniaoReal, vendasCount, convRate };
+    const convRate = propostaCount > 0 ? vendasCount / propostaCount : null;
+    return { propostaCount, vendasCount, convRate };
   } catch (err) {
     console.error('[gerencialService] fetchHistoricalConvRate error:', err);
-    return { reuniaoRealizadaCount: 0, vendasCount: 0, convRate: null };
+    return { propostaCount: 0, vendasCount: 0, convRate: null };
   }
 }
 
@@ -427,42 +433,42 @@ export async function fetchAdSpend() {
 }
 
 /**
- * Busca dados para cálculo do ciclo médio de proposta.
- * Retorna deals com data_reuniao + data de resolução:
+ * Busca dados para cálculo do ciclo médio de retorno sobre proposta.
+ * Retorna deals com data_proposta + data de resolução:
  *   Won/Open: data_fechamento (sales, join por email)
- *   Lost: close_time (crm_deals)
- * Deals sem data de resolução são excluídos.
+ *   Lost: lost_time (crm_deals)
+ * Filtro: SQL_FLAG=SIM + data_proposta preenchida.
+ * Deals sem resolução são excluídos.
  */
 export async function fetchPropostaCycleData() {
   try {
-    // Buscar deals a partir de 2026 com custom_fields (para extrair data_reuniao e SQL_FLAG)
     const { data: deals, error } = await supabase
       .from('crm_deals')
-      .select('id, status, person_email, custom_fields, close_time')
+      .select('id, status, person_email, custom_fields, close_time, lost_time')
       .gte('deal_created_at', DATA_START_DATE);
     if (error) throw error;
     if (!deals?.length) return [];
 
-    // Filtrar: SQL_FLAG=SIM e data_reuniao preenchida
+    // Filtrar: SQL_FLAG=SIM e data_proposta preenchida
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
     const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
-    const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
+    const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
 
     const qualified = deals.filter(d => {
       const cf = parseCustomFields(d.custom_fields);
-      return cf[sqlKey] == sqlSimVal && cf[reuniaoKey];
+      return cf[sqlKey] == sqlSimVal && cf[propostaKey];
     }).map(d => {
       const cf = parseCustomFields(d.custom_fields);
       return {
         ...d,
-        data_reuniao: cf[reuniaoKey],
+        data_proposta: cf[propostaKey],
         person_email: d.person_email?.trim()?.toLowerCase() || null,
       };
     });
 
     if (!qualified.length) return [];
 
-    // Buscar sales a partir de 2026 para join por email (won + open)
+    // Buscar sales para join por email (won + open → data_fechamento)
     const emails = [...new Set(qualified.map(d => d.person_email).filter(Boolean))];
     let salesByEmail = {};
     if (emails.length) {
@@ -475,26 +481,26 @@ export async function fetchPropostaCycleData() {
         for (const s of salesData) {
           const ep = s.email_pipedrive?.trim()?.toLowerCase();
           const es = s.email_stripe?.trim()?.toLowerCase();
-          // Primeiro encontrado = mais recente (ordenado desc), não sobrescreve
           if (ep && s.data_fechamento && !salesByEmail[ep]) salesByEmail[ep] = s.data_fechamento;
           if (es && s.data_fechamento && !salesByEmail[es]) salesByEmail[es] = s.data_fechamento;
         }
       }
     }
 
-    // Construir pares { data_reuniao, resolution_date }
+    // Construir pares { data_proposta, resolution_date }
     const cycleData = [];
     for (const d of qualified) {
       if (d.status === 'lost') {
-        // Lost: usar close_time
-        if (d.close_time) {
-          cycleData.push({ data_reuniao: d.data_reuniao, resolution_date: d.close_time });
+        // Lost: usar lost_time
+        const lostDate = d.lost_time || d.close_time;
+        if (lostDate) {
+          cycleData.push({ data_proposta: d.data_proposta, resolution_date: lostDate });
         }
       } else {
         // Won + Open: usar data_fechamento da sales
         const fechamento = d.person_email ? salesByEmail[d.person_email] : null;
         if (fechamento) {
-          cycleData.push({ data_reuniao: d.data_reuniao, resolution_date: fechamento });
+          cycleData.push({ data_proposta: d.data_proposta, resolution_date: fechamento });
         }
       }
     }
@@ -650,9 +656,10 @@ export async function fetchForecastData(funnel, startMonth, endMonth) {
         ? paginatedQuery(() =>
             supabase
               .from('sales')
-              .select('email_pipedrive')
+              .select('email_pipedrive, email_stripe, data_fechamento')
               .in('email_pipedrive', dealEmails)
               .gte('data_fechamento', DATA_START_DATE)
+              .order('data_fechamento', { ascending: false })
           )
         : Promise.resolve([]),
     ]);
@@ -670,11 +677,17 @@ export async function fetchForecastData(funnel, startMonth, endMonth) {
       if (contratoStageSet.has(d.stage_id)) dealsWithContrato.add(d.id);
     }
 
-    // 3. Montar wonEmailSet a partir do resultado paralelo
+    // 3. Montar wonEmailSet + salesDateByEmail a partir do resultado paralelo
     const wonEmailSet = new Set();
+    const salesDateByEmail = {};
     for (const s of salesData) {
-      const e = s.email_pipedrive?.trim()?.toLowerCase();
-      if (e) wonEmailSet.add(e);
+      const ep = s.email_pipedrive?.trim()?.toLowerCase();
+      const es = s.email_stripe?.trim()?.toLowerCase();
+      if (ep) {
+        wonEmailSet.add(ep);
+        if (s.data_fechamento && !salesDateByEmail[ep]) salesDateByEmail[ep] = s.data_fechamento;
+      }
+      if (es && s.data_fechamento && !salesDateByEmail[es]) salesDateByEmail[es] = s.data_fechamento;
     }
 
     // Marcar milestones
@@ -753,10 +766,18 @@ export async function fetchForecastData(funnel, startMonth, endMonth) {
       ),
     ];
 
-    // Retorno Sobre Proposta: data_proposta → (lost_time ou close_time) — qualquer desfecho
+    // Retorno Sobre Proposta: data_proposta → desfecho (data_fechamento sales ou lost_time)
+    // Filtro: SQL_FLAG=SIM + data_proposta — mesma lógica do fetchPropostaCycleData
     const cycleRetornoProposta = avgValid(
-      deals.filter(d => d._dataProposta && (d.lost_time || d.close_time))
-        .map(d => daysDiff(d._dataProposta, d.lost_time || d.close_time))
+      deals.filter(d => d._isSQL && d._dataProposta).map(d => {
+        if (d.status === 'lost') {
+          const lostDate = d.lost_time || d.close_time;
+          return lostDate ? daysDiff(d._dataProposta, lostDate) : null;
+        }
+        const email = d.person_email?.trim()?.toLowerCase();
+        const fechamento = email ? salesDateByEmail[email] : null;
+        return fechamento ? daysDiff(d._dataProposta, fechamento) : null;
+      })
     );
 
     // 7. Transitions array — 5 transições do funil principal
