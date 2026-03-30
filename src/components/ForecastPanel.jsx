@@ -12,25 +12,31 @@ const STAGE_ICONS = {
   sql: '✅',
   reuniao: '📅',
   proposta: '📝',
+  venda: '💰',
   contrato: '📄',
 };
 
 /** Gera e baixa um CSV a partir de array de objetos */
 function downloadCSV(rows, filename) {
   if (!rows.length) return;
-  const headers = ['Etapa', 'Funil', 'Deal', 'Pessoa', 'Email', 'Telefone', 'Valor', 'Data Criação', 'Stage'];
+  const headers = ['Email', 'Telefone', 'Etapa', 'Funil', 'Stage', 'Status', 'Valor', 'Data Criação', 'SQL?', 'Data Reunião', 'Reunião Realizada', 'Data Proposta', 'Data Fechamento', 'Lost Time'];
   const csvRows = [
     headers.join(';'),
     ...rows.map(r => [
-      r.etapa,
-      `"${(r.funil || '').replace(/"/g, '""')}"`,
-      `"${(r.title || '').replace(/"/g, '""')}"`,
-      `"${(r.person_name || '').replace(/"/g, '""')}"`,
       r.person_email,
       r.person_phone,
+      r.etapa,
+      `"${(r.funil || '').replace(/"/g, '""')}"`,
+      `"${(r.stage_name || '').replace(/"/g, '""')}"`,
+      r.status,
       r.value,
       r.deal_created_at ? String(r.deal_created_at).slice(0, 10) : '—',
-      r.stage_name,
+      r.is_sql,
+      r.data_reuniao ? String(r.data_reuniao).slice(0, 10) : '—',
+      r.reuniao_realizada,
+      r.data_proposta ? String(r.data_proposta).slice(0, 10) : '—',
+      r.data_fechamento,
+      r.lost_time,
     ].join(';')),
   ];
   const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
@@ -171,10 +177,10 @@ export default function ForecastPanel({ data, loading, selectedFunnel }) {
             </div>
           );
         })}
-        {/* Último stage: Venda */}
+        {/* Último stage: Contrato */}
         <div className="flex flex-col items-center shrink-0">
           <div className="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap bg-positive/15 text-positive border border-positive/30">
-            Venda
+            Contrato
           </div>
           <span className="text-[10px] text-content-tertiary mt-1 tabular-nums">
             {F.n(transitions[transitions.length - 1]?.toCount ?? 0)}
@@ -207,8 +213,8 @@ export default function ForecastPanel({ data, loading, selectedFunnel }) {
               <th className="text-right py-2.5 px-3 font-medium">Valor no Pipe</th>
               <th className="text-right py-2.5 px-3 font-medium">Conv. → Próx.</th>
               <th className="text-right py-2.5 px-3 font-medium">Ciclo Médio</th>
-              <th className="text-right py-2.5 px-3 font-medium">Conv. → Venda</th>
-              <th className="text-right py-2.5 px-3 font-medium">Dias → Venda</th>
+              <th className="text-right py-2.5 px-3 font-medium">Conv. → Contrato</th>
+              <th className="text-right py-2.5 px-3 font-medium">Dias → Contrato</th>
               <th className="text-right py-2.5 px-3 font-medium">Vendas Prev.</th>
               <th className="text-right py-2.5 pl-3 font-medium">Receita Prev.</th>
               <th className="text-center py-2.5 pl-2 font-medium w-10"></th>

@@ -650,31 +650,24 @@ export async function fetchForecastData(funnel) {
     }
 
     // 4. Contagens por milestone (cumulativas)
-    // Funil: MQL → SQL → Reunião → Proposta → Venda
-    // Proposta+Contrato são mergeados como último milestone antes de Venda
-    // (muitos deals pulam Contrato, indo direto de Proposta para Won)
+    // Funil: MQL → SQL → Reunião → Proposta → Venda → Contrato
     const total = deals.length;
     const sqlCount = deals.filter(d => d._isSQL).length;
     const reuniaoCount = deals.filter(d => d._isSQL && d._dataReuniao).length;
-    // Proposta milestone: tem data_proposta OU passou por contrato (união)
-    const propostaOrContratoDeals = deals.filter(d => (d._isSQL && d._dataProposta) || d._passedContrato);
-    const propostaCount = propostaOrContratoDeals.length;
+    const propostaCount = deals.filter(d => d._isSQL && d._dataProposta).length;
     const wonCount = deals.filter(d => d._isWon).length;
+    const contratoCount = deals.filter(d => d._passedContrato).length;
 
     const safe = (num, den) => den > 0 ? num / den : null;
 
-    // 5. Taxas de conversão — 4 transições (funil linear)
+    // 5. Taxas de conversão — 5 transições (funil linear)
     const convRates = [
-      safe(sqlCount, total),           // MQL→SQL
-      safe(reuniaoCount, sqlCount),    // SQL→Reunião
-      safe(propostaCount, reuniaoCount), // Reunião→Proposta
-      safe(wonCount, propostaCount),   // Proposta→Venda
+      safe(sqlCount, total),              // MQL→SQL
+      safe(reuniaoCount, sqlCount),       // SQL→Reunião
+      safe(propostaCount, reuniaoCount),  // Reunião→Proposta
+      safe(wonCount, propostaCount),      // Proposta→Venda
+      safe(contratoCount, wonCount),      // Venda→Contrato
     ];
-
-    // Taxa direta Contrato→Venda (para deals que já estão em contrato)
-    const contratoCount = deals.filter(d => d._passedContrato).length;
-    const wonContratoCount = deals.filter(d => d._isWon && d._passedContrato).length;
-    const convContratoVenda = safe(wonContratoCount, contratoCount);
 
     // 6. Ciclos médios entre etapas
     function parseDateSafe(v) {
@@ -708,22 +701,22 @@ export async function fetchForecastData(funnel) {
       // Proposta→Venda: data_proposta → won_time/close_time
       avgValid(deals.filter(d => d._isWon && d._dataProposta && (d.won_time || d.close_time))
         .map(d => daysDiff(d._dataProposta, d.won_time || d.close_time))),
+      // Venda→Contrato: won_time/close_time → contrato entry
+      avgValid(
+        deals.filter(d => d._isWon && d._passedContrato && contratoEntryTime[d.id] && (d.won_time || d.close_time))
+          .map(d => daysDiff(d.won_time || d.close_time, contratoEntryTime[d.id]))
+      ),
     ];
 
-    // Ciclo direto Contrato→Venda (para deals em contrato)
-    const cycleContratoVenda = avgValid(
-      deals.filter(d => d._isWon && d._passedContrato && contratoEntryTime[d.id] && (d.won_time || d.close_time))
-        .map(d => daysDiff(contratoEntryTime[d.id], d.won_time || d.close_time))
-    );
-
-    // 7. Transitions array — 4 transições do funil principal
+    // 7. Transitions array — 5 transições do funil principal
     const transitionLabels = [
       { from: 'MQL', to: 'SQL' },
       { from: 'SQL', to: 'Reunião' },
       { from: 'Reunião', to: 'Proposta' },
       { from: 'Proposta', to: 'Venda' },
+      { from: 'Venda', to: 'Contrato' },
     ];
-    const milestoneCounts = [total, sqlCount, reuniaoCount, propostaCount, wonCount];
+    const milestoneCounts = [total, sqlCount, reuniaoCount, propostaCount, wonCount, contratoCount];
 
     const transitions = transitionLabels.map((t, i) => ({
       ...t,
@@ -740,29 +733,13 @@ export async function fetchForecastData(funnel) {
       { key: 'sql', label: 'SQL', ids: new Set(STAGE_IDS.SQL), transIdx: 1 },
       { key: 'reuniao', label: 'Reunião Agendada', ids: new Set(STAGE_IDS.REUNIAO_AGENDADA), transIdx: 2 },
       { key: 'proposta', label: 'Proposta Feita', ids: new Set(STAGE_IDS.PROPOSTA), transIdx: 3 },
-      { key: 'contrato', label: 'Contrato Enviado', ids: new Set(STAGE_IDS.CONTRATO_ENVIADO), transIdx: -1 },
+      { key: 'contrato', label: 'Contrato Enviado', ids: new Set(STAGE_IDS.CONTRATO_ENVIADO), transIdx: 4 },
     ];
 
     const stages = stageGroups.map((group) => {
       const stageDeals = openDeals.filter(d => group.ids.has(d.stage_id));
       const count = stageDeals.length;
       const value = stageDeals.reduce((acc, d) => acc + (d.value || 0), 0);
-
-      if (group.key === 'contrato') {
-        // Contrato: usa taxa direta Contrato→Venda (já passou por Proposta)
-        return {
-          key: group.key,
-          label: group.label,
-          openDeals: count,
-          pipelineValue: value,
-          convToSale: convContratoVenda,
-          daysToSale: cycleContratoVenda != null ? Math.round(cycleContratoVenda) : null,
-          expectedSales: convContratoVenda != null ? count * convContratoVenda : null,
-          expectedRevenue: convContratoVenda != null ? value * convContratoVenda : null,
-          stepConvRate: convContratoVenda,
-          stepCycleDays: cycleContratoVenda,
-        };
-      }
 
       // Cascata: multiplica taxas a partir do transIdx deste stage
       let cascadingConv = 1;
@@ -812,7 +789,7 @@ export async function fetchForecastData(funnel) {
 export async function fetchForecastStageDeals(funnel) {
   try {
     let query = supabase.from('crm_deals')
-      .select('title, person_name, person_email, person_phone, value, stage_id, stage_name, pipeline_id, deal_created_at')
+      .select('title, person_name, person_email, person_phone, value, stage_id, stage_name, status, pipeline_id, deal_created_at, close_time, lost_time, custom_fields')
       .eq('status', 'open')
       .gte('deal_created_at', DATA_START_DATE);
     query = applyFunnelFilter(query, funnel);
@@ -835,21 +812,78 @@ export async function fetchForecastStageDeals(funnel) {
       { key: 'contrato', label: 'Contrato Enviado', ids: new Set(STAGE_IDS.CONTRATO_ENVIADO) },
     ];
 
+    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
+    const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+    const sqlNaoVal = CUSTOM_FIELDS.SQL_FLAG.values.NAO;
+    const sqlRevisarVal = CUSTOM_FIELDS.SQL_FLAG.values.A_REVISAR;
+    const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
+    const reuniaoRealizadaKey = CUSTOM_FIELDS.REUNIAO_REALIZADA.key;
+    const reuniaoRealizadaSim = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
+    const reuniaoRealizadaNao = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.NAO;
+    const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
+
+    // Mapeamento correto dos valores do campo SQL?
+    function mapSqlFlag(val) {
+      if (val == sqlSimVal) return 'Sim';
+      if (val == sqlNaoVal) return 'Não';
+      if (val == sqlRevisarVal) return 'A Revisar';
+      return '—';
+    }
+    // Mapeamento correto dos valores do campo Reunião Realizada
+    function mapReuniaoRealizada(val) {
+      if (val == reuniaoRealizadaSim) return 'Sim';
+      if (val == reuniaoRealizadaNao) return 'Não';
+      return '—';
+    }
+
+    // Enrich deals com custom fields parseados
+    const enriched = deals.map(d => {
+      const cf = parseCustomFields(d.custom_fields);
+      return { ...d, _cf: cf };
+    });
+
     const result = {};
     for (const group of stageMap) {
-      result[group.key] = deals
-        .filter(d => group.ids.has(d.stage_id))
-        .map(d => ({
-          title: d.title ?? '—',
-          person_name: d.person_name ?? '—',
-          person_email: d.person_email ?? '—',
-          person_phone: d.person_phone ?? '—',
-          value: d.value ?? 0,
-          deal_created_at: d.deal_created_at ?? '—',
-          stage_name: d.stage_name ?? '—',
-          funil: pipelineToFunnel[d.pipeline_id] ?? `Pipeline ${d.pipeline_id}`,
-          etapa: group.label,
-        }));
+      let filtered = enriched.filter(d => group.ids.has(d.stage_id));
+
+      // Filtros por etapa:
+      if (group.key === 'sql') {
+        // SQL: apenas deals com email E telefone E SQL? = Sim
+        filtered = filtered.filter(d =>
+          d.person_email && d.person_email.trim() &&
+          d.person_phone && d.person_phone.trim() &&
+          d._cf[sqlKey] == sqlSimVal
+        );
+      } else if (group.key === 'reuniao') {
+        // Reunião: apenas SQL? = Sim E data_reuniao preenchida
+        filtered = filtered.filter(d =>
+          d._cf[sqlKey] == sqlSimVal &&
+          d._cf[reuniaoKey]
+        );
+      } else if (group.key === 'proposta') {
+        // Proposta: apenas SQL? = Sim E Reunião Realizada = Sim
+        filtered = filtered.filter(d =>
+          d._cf[sqlKey] == sqlSimVal &&
+          d._cf[reuniaoRealizadaKey] == reuniaoRealizadaSim
+        );
+      }
+
+      result[group.key] = filtered.map(d => ({
+        person_email: d.person_email ?? '—',
+        person_phone: d.person_phone ?? '—',
+        etapa: group.label,
+        funil: pipelineToFunnel[d.pipeline_id] ?? `Pipeline ${d.pipeline_id}`,
+        stage_name: d.stage_name ?? '—',
+        status: d.status ?? '—',
+        value: d.value ?? 0,
+        deal_created_at: d.deal_created_at ?? '—',
+        is_sql: mapSqlFlag(d._cf[sqlKey]),
+        data_reuniao: d._cf[reuniaoKey] ? String(d._cf[reuniaoKey]).slice(0, 10) : '—',
+        reuniao_realizada: mapReuniaoRealizada(d._cf[reuniaoRealizadaKey]),
+        data_proposta: d._cf[propostaKey] ? String(d._cf[propostaKey]).slice(0, 10) : '—',
+        data_fechamento: d.close_time ? String(d.close_time).slice(0, 10) : '—',
+        lost_time: d.lost_time ? String(d.lost_time).slice(0, 10) : '—',
+      }));
     }
     return result;
   } catch (err) {
