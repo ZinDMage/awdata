@@ -228,7 +228,7 @@ export async function fetchPillCounts(funnel) {
   try {
     let query = supabase
       .from('crm_deals')
-      .select('stage_id, status')
+      .select('stage_id, status, person_email, person_phone, custom_fields')
       .eq('status', 'open')
       .gte('deal_created_at', DATA_START_DATE);
 
@@ -236,6 +236,12 @@ export async function fetchPillCounts(funnel) {
 
     const { data: deals, error } = await query;
     if (error) throw error;
+
+    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
+    const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+    const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
+    const reuniaoRealizadaKey = CUSTOM_FIELDS.REUNIAO_REALIZADA.key;
+    const reuniaoRealizadaSim = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
 
     const counts = {};
     for (const key of Object.keys(STAGE_TABS)) {
@@ -247,6 +253,17 @@ export async function fetchPillCounts(funnel) {
       let matched = false;
       for (const [key, tab] of Object.entries(STAGE_TABS)) {
         if (tab.stageIds.includes(deal.stage_id)) {
+          const cf = parseCustomFields(deal.custom_fields);
+          const isSQL = cf[sqlKey] == sqlSimVal;
+          const hasEmailPhone = !!(deal.person_email?.trim() && deal.person_phone?.trim());
+          const hasDataReuniao = !!cf[reuniaoKey];
+          const reuniaoRealizada = cf[reuniaoRealizadaKey] == reuniaoRealizadaSim;
+
+          // Mesmos filtros do ForecastPanel
+          if (key === 'sql' && !(hasEmailPhone && isSQL)) break;
+          if (key === 'reuniao' && !(isSQL && hasDataReuniao)) break;
+          if (key === 'proposta' && !(isSQL && reuniaoRealizada)) break;
+
           counts[key]++;
           matched = true;
           break;
@@ -576,7 +593,7 @@ export async function fetchForecastData(funnel) {
     // 1. Todos os deals a partir de 2026 (paginado)
     const allDeals = await paginatedQuery(() => {
       let q = supabase.from('crm_deals')
-        .select('id, stage_id, status, deal_created_at, close_time, won_time, value, pipeline_id, custom_fields, person_email')
+        .select('id, stage_id, status, deal_created_at, close_time, won_time, value, pipeline_id, custom_fields, person_email, person_phone')
         .gte('deal_created_at', DATA_START_DATE);
       return applyFunnelFilter(q, funnel);
     });
