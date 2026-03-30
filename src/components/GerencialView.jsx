@@ -259,17 +259,18 @@ export default function GerencialView() {
   // Forecast: previsibilidade de receita (carrega no bowtie)
   const [forecastData, setForecastData] = useState(null);
   const [forecastLoading, setForecastLoading] = useState(false);
+  const [forecastPeriod, setForecastPeriod] = useState({ startMonth: null, endMonth: null }); // null = all-time
   useEffect(() => {
     let cancelled = false;
     setForecastLoading(true);
-    fetchForecastData(selectedFunnel).then(data => {
+    fetchForecastData(selectedFunnel, forecastPeriod.startMonth, forecastPeriod.endMonth).then(data => {
       if (!cancelled) { setForecastData(data); setForecastLoading(false); }
     }).catch(err => {
       console.error('[GerencialView] forecast fetch error:', err);
       if (!cancelled) { setForecastData(null); setForecastLoading(false); }
     });
     return () => { cancelled = true; };
-  }, [selectedFunnel]);
+  }, [selectedFunnel, forecastPeriod]);
 
   // P3: Ref para fade transition entre sub-abas
   const [fadeIn, setFadeIn] = useState(true);
@@ -361,7 +362,7 @@ export default function GerencialView() {
                 />
 
                 {/* Previsibilidade de Receita */}
-                <ForecastPanel data={forecastData} loading={forecastLoading} selectedFunnel={selectedFunnel} />
+                <ForecastPanel data={forecastData} loading={forecastLoading} selectedFunnel={selectedFunnel} period={forecastPeriod} onPeriodChange={setForecastPeriod} />
               </div>
             )}
           </>

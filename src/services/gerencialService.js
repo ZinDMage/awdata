@@ -587,13 +587,16 @@ export async function fetchSqlContext() {
  * Dados para previsibilidade de receita: taxas de conversão e ciclos médios entre etapas.
  * Retorna { transitions, stages, bottleneckIdx }.
  */
-export async function fetchForecastData(funnel) {
+export async function fetchForecastData(funnel, startMonth, endMonth) {
   try {
-    // 1. Todos os deals a partir de 2026 (paginado)
+    // 1. Deals filtrados por período (ou all-time desde 2026)
+    const dateFrom = startMonth ? `${startMonth}-01` : DATA_START_DATE;
+    const dateTo = endMonth ? getNextMonth(endMonth) : null;
     const allDeals = await paginatedQuery(() => {
       let q = supabase.from('crm_deals')
-        .select('id, stage_id, status, deal_created_at, close_time, won_time, value, pipeline_id, custom_fields, person_email, person_phone')
-        .gte('deal_created_at', DATA_START_DATE);
+        .select('id, stage_id, status, deal_created_at, close_time, won_time, lost_time, value, pipeline_id, custom_fields, person_email, person_phone')
+        .gte('deal_created_at', dateFrom);
+      if (dateTo) q = q.lt('deal_created_at', dateTo);
       return applyFunnelFilter(q, funnel);
     });
     if (!allDeals?.length) return null;
@@ -718,15 +721,21 @@ export async function fetchForecastData(funnel) {
       // Reunião→Proposta: data_reuniao → data_proposta
       avgValid(deals.filter(d => d._dataReuniao && d._dataProposta)
         .map(d => daysDiff(d._dataReuniao, d._dataProposta))),
-      // Proposta→Venda: data_proposta → won_time/close_time
-      avgValid(deals.filter(d => d._isWon && d._dataProposta && (d.won_time || d.close_time))
-        .map(d => daysDiff(d._dataProposta, d.won_time || d.close_time))),
-      // Venda→Contrato: won_time/close_time → contrato entry
+      // Proposta→Venda: data_fechamento (close_time) - data_proposta (apenas deals won)
+      avgValid(deals.filter(d => d._isWon && d._dataProposta && d.close_time)
+        .map(d => daysDiff(d._dataProposta, d.close_time))),
+      // Venda→Contrato: close_time → contrato entry
       avgValid(
-        deals.filter(d => d._isWon && d._passedContrato && contratoEntryTime[d.id] && (d.won_time || d.close_time))
-          .map(d => daysDiff(d.won_time || d.close_time, contratoEntryTime[d.id]))
+        deals.filter(d => d._isWon && d._passedContrato && contratoEntryTime[d.id] && d.close_time)
+          .map(d => daysDiff(d.close_time, contratoEntryTime[d.id]))
       ),
     ];
+
+    // Retorno Sobre Proposta: data_proposta → (lost_time ou close_time) — qualquer desfecho
+    const cycleRetornoProposta = avgValid(
+      deals.filter(d => d._dataProposta && (d.lost_time || d.close_time))
+        .map(d => daysDiff(d._dataProposta, d.lost_time || d.close_time))
+    );
 
     // 7. Transitions array — 5 transições do funil principal
     const transitionLabels = [
@@ -794,7 +803,8 @@ export async function fetchForecastData(funnel) {
         expectedSales: hasNull ? null : count * cascadingConv,
         expectedRevenue: hasNull ? null : value * cascadingConv,
         stepConvRate: convRates[group.transIdx] ?? null,
-        stepCycleDays: cycleTimes[group.transIdx] ?? null,
+        // Proposta: ciclo = retorno sobre proposta (tempo até qualquer desfecho)
+        stepCycleDays: group.key === 'proposta' ? (cycleRetornoProposta ?? null) : (cycleTimes[group.transIdx] ?? null),
       };
     });
 
@@ -807,7 +817,7 @@ export async function fetchForecastData(funnel) {
       }
     }
 
-    return { transitions, stages, bottleneckIdx };
+    return { transitions, stages, bottleneckIdx, cycleRetornoProposta };
   } catch (err) {
     console.error('[gerencialService] fetchForecastData error:', err);
     return null;
@@ -819,12 +829,15 @@ export async function fetchForecastData(funnel) {
  * Retorna { mql: [...], sql: [...], reuniao: [...], proposta: [...], contrato: [...] }
  * Cada deal: { title, person_name, person_email, person_phone, value, stage_name, etapa }
  */
-export async function fetchForecastStageDeals(funnel) {
+export async function fetchForecastStageDeals(funnel, startMonth, endMonth) {
   try {
+    const dateFrom = startMonth ? `${startMonth}-01` : DATA_START_DATE;
+    const dateTo = endMonth ? getNextMonth(endMonth) : null;
     let query = supabase.from('crm_deals')
       .select('title, person_name, person_email, person_phone, value, stage_id, stage_name, status, pipeline_id, deal_created_at, close_time, lost_time, custom_fields')
       .eq('status', 'open')
-      .gte('deal_created_at', DATA_START_DATE);
+      .gte('deal_created_at', dateFrom);
+    if (dateTo) query = query.lt('deal_created_at', dateTo);
     query = applyFunnelFilter(query, funnel);
     const { data: deals, error } = await query;
     if (error) throw error;

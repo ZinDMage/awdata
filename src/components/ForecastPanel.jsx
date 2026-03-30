@@ -7,6 +7,22 @@ import { fetchForecastStageDeals } from '@/services/gerencialService';
  * Mostra taxas de conversão, ciclos médios e previsão de receita por stage.
  */
 
+// Gerar opções de mês (últimos 24 meses)
+function generateMonthOptions() {
+  const opts = [];
+  const now = new Date();
+  for (let i = 0; i < 24; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const value = `${y}-${m}`;
+    const label = d.toLocaleDateString('pt-BR', { month: 'short', year: 'numeric' });
+    opts.push({ value, label });
+  }
+  return opts;
+}
+const MONTH_OPTIONS = generateMonthOptions();
+
 const STAGE_ICONS = {
   mql: '📨',
   sql: '✅',
@@ -63,32 +79,32 @@ function daysCompact(v) {
   return `${rounded}d`;
 }
 
-export default function ForecastPanel({ data, loading, selectedFunnel }) {
+export default function ForecastPanel({ data, loading, selectedFunnel, period, onPeriodChange }) {
   const [exporting, setExporting] = useState(false);
 
   const handleExportAll = useCallback(async () => {
     setExporting(true);
     try {
-      const stageDeals = await fetchForecastStageDeals(selectedFunnel);
+      const stageDeals = await fetchForecastStageDeals(selectedFunnel, period?.startMonth, period?.endMonth);
       const allRows = Object.values(stageDeals).flat();
       downloadCSV(allRows, 'forecast-deals-todos.csv');
     } catch (err) {
       console.error('[ForecastPanel] export error:', err);
     }
     setExporting(false);
-  }, [selectedFunnel]);
+  }, [selectedFunnel, period]);
 
   const handleExportStage = useCallback(async (stageKey) => {
     setExporting(true);
     try {
-      const stageDeals = await fetchForecastStageDeals(selectedFunnel);
+      const stageDeals = await fetchForecastStageDeals(selectedFunnel, period?.startMonth, period?.endMonth);
       const rows = stageDeals[stageKey] || [];
       downloadCSV(rows, `forecast-deals-${stageKey}.csv`);
     } catch (err) {
       console.error('[ForecastPanel] export stage error:', err);
     }
     setExporting(false);
-  }, [selectedFunnel]);
+  }, [selectedFunnel, period]);
 
   if (loading) {
     return (
@@ -103,7 +119,7 @@ export default function ForecastPanel({ data, loading, selectedFunnel }) {
   }
 
   if (!data) return null;
-  const { transitions, stages, bottleneckIdx } = data;
+  const { transitions, stages, bottleneckIdx, cycleRetornoProposta } = data;
 
   const totalExpectedRevenue = stages.reduce((acc, s) => acc + (s.expectedRevenue ?? 0), 0);
   const totalExpectedSales = stages.reduce((acc, s) => acc + (s.expectedSales ?? 0), 0);
@@ -117,10 +133,46 @@ export default function ForecastPanel({ data, loading, selectedFunnel }) {
             Previsibilidade de Receita
           </h3>
           <p className="text-xs text-content-tertiary mt-1">
-            Baseado em taxas de conversão e ciclos médios históricos (desde jan/2026)
+            Baseado em taxas de conversão e ciclos médios históricos
+            {period?.startMonth || period?.endMonth
+              ? ''
+              : ' (desde jan/2026)'}
           </p>
         </div>
         <div className="flex items-center gap-4">
+          {/* Filtro de período por deal_created_at */}
+          <div className="flex items-center gap-2">
+            <select
+              value={period?.startMonth || ''}
+              onChange={(e) => onPeriodChange?.({ ...period, startMonth: e.target.value || null })}
+              className="bg-surface-tertiary rounded-lg px-2 py-1.5 text-xs text-content-primary border border-border-subtle/20 outline-none focus:ring-1 focus:ring-info/40"
+            >
+              <option value="">Início</option>
+              {MONTH_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <span className="text-xs text-content-tertiary">→</span>
+            <select
+              value={period?.endMonth || ''}
+              onChange={(e) => onPeriodChange?.({ ...period, endMonth: e.target.value || null })}
+              className="bg-surface-tertiary rounded-lg px-2 py-1.5 text-xs text-content-primary border border-border-subtle/20 outline-none focus:ring-1 focus:ring-info/40"
+            >
+              <option value="">Fim</option>
+              {MONTH_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            {(period?.startMonth || period?.endMonth) && (
+              <button
+                onClick={() => onPeriodChange?.({ startMonth: null, endMonth: null })}
+                className="text-xs text-content-tertiary hover:text-content-primary transition-colors"
+                title="Limpar filtro"
+              >
+                ✕
+              </button>
+            )}
+          </div>
           {/* Botão extrair base completa */}
           <button
             onClick={handleExportAll}
@@ -199,6 +251,17 @@ export default function ForecastPanel({ data, loading, selectedFunnel }) {
             {transitions[bottleneckIdx].avgCycleDays != null && (
               <>, ciclo médio de {Math.round(transitions[bottleneckIdx].avgCycleDays)} dias</>
             )}
+          </span>
+        </div>
+      )}
+
+      {/* Retorno Sobre Proposta */}
+      {cycleRetornoProposta != null && (
+        <div className="mb-6 flex items-center gap-2 text-xs bg-info/10 text-info rounded-lg px-3 py-2 border border-info/20">
+          <span className="text-sm">📊</span>
+          <span>
+            <strong>Retorno Sobre Proposta:</strong>{' '}
+            tempo médio de {Math.round(cycleRetornoProposta)} dias entre proposta e desfecho (venda ou perda)
           </span>
         </div>
       )}
