@@ -1,11 +1,31 @@
 import { supabase } from './supabaseClient';
-import { STAGE_TABS, STAGE_IDS, CUSTOM_FIELDS, PIPELINE_FUNNELS, parseCustomFields } from '@/config/pipedrive';
+import { STAGE_TABS, STAGE_IDS, CUSTOM_FIELDS, PIPELINE_FUNNELS, FUNNEL_LABELS, parseCustomFields } from '@/config/pipedrive';
 import { resolveBatch } from '@/utils/dataPrecedence';
 import { classifyLead } from '@/services/classificationService';
 import { normalizeEmail, deduplicateYayforms, fetchAll } from '@/services/fetchService';
 
 // ── Data mínima: só trabalhamos com dados a partir de 2026 ──
 const DATA_START_DATE = '2026-01-01';
+
+/**
+ * Helper: executa query Supabase paginada (batches de 1000).
+ * Recebe um "query builder" fn que retorna a query base com todos os filtros.
+ * Retorna array completo sem truncamento.
+ */
+async function paginatedQuery(buildQuery) {
+  let all = [];
+  let from = 0;
+  const PAGE = 1000;
+  while (true) {
+    const { data, error } = await buildQuery().range(from, from + PAGE - 1);
+    if (error) { console.error('[paginatedQuery] error:', error); break; }
+    if (!data || data.length === 0) break;
+    all = all.concat(data);
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+  return all;
+}
 
 // ── Bowtie funnel stages (7 stages, cumulative progression) ──
 const BOWTIE_STAGES = [
@@ -32,16 +52,14 @@ function applyFunnelFilter(query, funnel) {
  */
 export async function fetchBowtieData(startMonth, endMonth, funnel) {
   try {
-    let query = supabase
-      .from('crm_deals')
-      .select('id, stage_id, stage_name, status, deal_created_at, close_time, value, pipeline_id, custom_fields, person_email')
-      .gte('deal_created_at', `${startMonth}-01`)
-      .lt('deal_created_at', getNextMonth(endMonth));
-
-    query = applyFunnelFilter(query, funnel);
-
-    const { data: deals, error } = await query;
-    if (error) throw error;
+    const deals = await paginatedQuery(() => {
+      let q = supabase
+        .from('crm_deals')
+        .select('id, stage_id, stage_name, status, deal_created_at, close_time, value, pipeline_id, custom_fields, person_email')
+        .gte('deal_created_at', `${startMonth}-01`)
+        .lt('deal_created_at', getNextMonth(endMonth));
+      return applyFunnelFilter(q, funnel);
+    });
     if (!deals?.length) return { stages: [], conversions: [], avgTimes: [] };
 
     // Contagem cumulativa: quantos deals do período passaram por cada etapa
@@ -50,13 +68,15 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
     // ── Lead e MQL: fonte primária é yayforms_responses (inbound) ──
     const isInboundScope = !funnel || funnel === 'todos' || funnel === 'inbound';
     if (isInboundScope) {
-      const { data: yayData } = await supabase
-        .from('yayforms_responses')
-        .select('lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market, submitted_at')
-        .gte('submitted_at', `${startMonth}-01`)
-        .lt('submitted_at', getNextMonth(endMonth));
+      const yayData = await paginatedQuery(() =>
+        supabase
+          .from('yayforms_responses')
+          .select('lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market, submitted_at')
+          .gte('submitted_at', `${startMonth}-01`)
+          .lt('submitted_at', getNextMonth(endMonth))
+      );
 
-      if (yayData) {
+      if (yayData.length) {
         // Normalizar emails e deduplicar (mesma lógica do fetchService)
         const normalized = yayData.map(r => ({ ...r, lead_email: normalizeEmail(r.lead_email) }));
         const deduped = deduplicateYayforms(normalized);
@@ -112,16 +132,17 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
       .filter(Boolean);
 
     if (dealEmails.length > 0) {
-      const { data: salesData, error: salesError } = await supabase
-        .from('sales')
-        .select('email_pipedrive')
-        .in('email_pipedrive', [...new Set(dealEmails)])
-        .gte('data_fechamento', `${startMonth}-01`)
-        .lt('data_fechamento', getNextMonth(endMonth));
+      const uniqueEmails = [...new Set(dealEmails)];
+      const salesData = await paginatedQuery(() =>
+        supabase
+          .from('sales')
+          .select('email_pipedrive')
+          .in('email_pipedrive', uniqueEmails)
+          .gte('data_fechamento', `${startMonth}-01`)
+          .lt('data_fechamento', getNextMonth(endMonth))
+      );
 
-      if (salesError) console.error('[gerencialService] sales query error:', salesError);
-
-      const salesEmails = new Set((salesData || []).map(s => s.email_pipedrive?.trim()?.toLowerCase()).filter(Boolean));
+      const salesEmails = new Set(salesData.map(s => s.email_pipedrive?.trim()?.toLowerCase()).filter(Boolean));
       counts.vendas = deals.filter(d => {
         const email = d.person_email?.trim()?.toLowerCase();
         return email && salesEmails.has(email);
@@ -144,15 +165,15 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
 
     // Tempo médio por stage via transitions
     const dealIds = deals.map(d => d.id);
-    const transQuery = supabase
-      .from('crm_stage_transitions')
-      .select('deal_id, to_stage_id, time_in_previous_stage_sec')
-      .in('deal_id', dealIds)
-      .gte('transitioned_at', `${startMonth}-01`)
-      .lt('transitioned_at', getNextMonth(endMonth));
-
-    const { data: transitions } = await transQuery;
-    const avgTimes = computeBowtieAvgTimes(transitions || []);
+    const transitions = await paginatedQuery(() =>
+      supabase
+        .from('crm_stage_transitions')
+        .select('deal_id, to_stage_id, time_in_previous_stage_sec')
+        .in('deal_id', dealIds)
+        .gte('transitioned_at', `${startMonth}-01`)
+        .lt('transitioned_at', getNextMonth(endMonth))
+    );
+    const avgTimes = computeBowtieAvgTimes(transitions);
 
     const perda = deals.filter(d => d.status === 'lost').length;
     const resultado = deals.filter(d => d.status === 'won').length;
@@ -543,6 +564,297 @@ export async function fetchSqlContext() {
   } catch (err) {
     console.error('[gerencialService] fetchSqlContext error:', err);
     return { totalMql: 0, totalSql: 0 };
+  }
+}
+
+/**
+ * Dados para previsibilidade de receita: taxas de conversão e ciclos médios entre etapas.
+ * Retorna { transitions, stages, bottleneckIdx }.
+ */
+export async function fetchForecastData(funnel) {
+  try {
+    // 1. Todos os deals a partir de 2026 (paginado)
+    const allDeals = await paginatedQuery(() => {
+      let q = supabase.from('crm_deals')
+        .select('id, stage_id, status, deal_created_at, close_time, won_time, value, pipeline_id, custom_fields, person_email')
+        .gte('deal_created_at', DATA_START_DATE);
+      return applyFunnelFilter(q, funnel);
+    });
+    if (!allDeals?.length) return null;
+
+    // Parse custom fields
+    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
+    const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+    const qualKey = CUSTOM_FIELDS.DATA_QUALIFICACAO.key;
+    const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
+    const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
+
+    const deals = allDeals.map(d => {
+      const cf = parseCustomFields(d.custom_fields);
+      return {
+        ...d,
+        _isSQL: cf[sqlKey] == sqlSimVal,
+        _dataQualificacao: cf[qualKey] || null,
+        _dataReuniao: cf[reuniaoKey] || null,
+        _dataProposta: cf[propostaKey] || null,
+      };
+    });
+
+    // 2. Transitions + Sales em paralelo (ambas dependem apenas de dealIds/emails)
+    const dealIds = deals.map(d => d.id);
+    const contratoStageSet = new Set(STAGE_IDS.CONTRATO_ENVIADO);
+    const dealEmails = [...new Set(deals.map(d => d.person_email?.trim()?.toLowerCase()).filter(Boolean))];
+
+    const [allTransitions, salesData] = await Promise.all([
+      paginatedQuery(() =>
+        supabase
+          .from('crm_stage_transitions')
+          .select('deal_id, to_stage_id, transitioned_at, time_in_previous_stage_sec')
+          .in('deal_id', dealIds)
+      ),
+      dealEmails.length
+        ? paginatedQuery(() =>
+            supabase
+              .from('sales')
+              .select('email_pipedrive')
+              .in('email_pipedrive', dealEmails)
+              .gte('data_fechamento', DATA_START_DATE)
+          )
+        : Promise.resolve([]),
+    ]);
+    const dealsWithContrato = new Set();
+    const contratoEntryTime = {};
+    for (const t of allTransitions) {
+      if (contratoStageSet.has(t.to_stage_id)) {
+        dealsWithContrato.add(t.deal_id);
+        if (!contratoEntryTime[t.deal_id] || t.transitioned_at > contratoEntryTime[t.deal_id]) {
+          contratoEntryTime[t.deal_id] = t.transitioned_at;
+        }
+      }
+    }
+    for (const d of deals) {
+      if (contratoStageSet.has(d.stage_id)) dealsWithContrato.add(d.id);
+    }
+
+    // 3. Montar wonEmailSet a partir do resultado paralelo
+    const wonEmailSet = new Set();
+    for (const s of salesData) {
+      const e = s.email_pipedrive?.trim()?.toLowerCase();
+      if (e) wonEmailSet.add(e);
+    }
+
+    // Marcar milestones
+    for (const d of deals) {
+      d._passedContrato = dealsWithContrato.has(d.id);
+      d._isWon = d.status === 'won' || (d.person_email && wonEmailSet.has(d.person_email.trim().toLowerCase()));
+    }
+
+    // 4. Contagens por milestone (cumulativas)
+    // Funil: MQL → SQL → Reunião → Proposta → Venda
+    // Proposta+Contrato são mergeados como último milestone antes de Venda
+    // (muitos deals pulam Contrato, indo direto de Proposta para Won)
+    const total = deals.length;
+    const sqlCount = deals.filter(d => d._isSQL).length;
+    const reuniaoCount = deals.filter(d => d._isSQL && d._dataReuniao).length;
+    // Proposta milestone: tem data_proposta OU passou por contrato (união)
+    const propostaOrContratoDeals = deals.filter(d => (d._isSQL && d._dataProposta) || d._passedContrato);
+    const propostaCount = propostaOrContratoDeals.length;
+    const wonCount = deals.filter(d => d._isWon).length;
+
+    const safe = (num, den) => den > 0 ? num / den : null;
+
+    // 5. Taxas de conversão — 4 transições (funil linear)
+    const convRates = [
+      safe(sqlCount, total),           // MQL→SQL
+      safe(reuniaoCount, sqlCount),    // SQL→Reunião
+      safe(propostaCount, reuniaoCount), // Reunião→Proposta
+      safe(wonCount, propostaCount),   // Proposta→Venda
+    ];
+
+    // Taxa direta Contrato→Venda (para deals que já estão em contrato)
+    const contratoCount = deals.filter(d => d._passedContrato).length;
+    const wonContratoCount = deals.filter(d => d._isWon && d._passedContrato).length;
+    const convContratoVenda = safe(wonContratoCount, contratoCount);
+
+    // 6. Ciclos médios entre etapas
+    function parseDateSafe(v) {
+      if (!v) return null;
+      const s = String(v);
+      const d = new Date(s.length === 10 ? s + 'T00:00:00' : s);
+      return isNaN(d.getTime()) ? null : d;
+    }
+    function daysDiff(from, to) {
+      const f = parseDateSafe(from);
+      const t = parseDateSafe(to);
+      if (!f || !t) return null;
+      const diff = Math.round((t - f) / 86400000);
+      return diff >= 0 ? diff : null;
+    }
+    function avgValid(arr) {
+      const valid = arr.filter(v => v != null);
+      return valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null;
+    }
+
+    const cycleTimes = [
+      // MQL→SQL: deal_created_at → data_qualificacao
+      avgValid(deals.filter(d => d._isSQL && d._dataQualificacao)
+        .map(d => daysDiff(d.deal_created_at, d._dataQualificacao))),
+      // SQL→Reunião: data_qualificacao → data_reuniao
+      avgValid(deals.filter(d => d._dataQualificacao && d._dataReuniao)
+        .map(d => daysDiff(d._dataQualificacao, d._dataReuniao))),
+      // Reunião→Proposta: data_reuniao → data_proposta
+      avgValid(deals.filter(d => d._dataReuniao && d._dataProposta)
+        .map(d => daysDiff(d._dataReuniao, d._dataProposta))),
+      // Proposta→Venda: data_proposta → won_time/close_time
+      avgValid(deals.filter(d => d._isWon && d._dataProposta && (d.won_time || d.close_time))
+        .map(d => daysDiff(d._dataProposta, d.won_time || d.close_time))),
+    ];
+
+    // Ciclo direto Contrato→Venda (para deals em contrato)
+    const cycleContratoVenda = avgValid(
+      deals.filter(d => d._isWon && d._passedContrato && contratoEntryTime[d.id] && (d.won_time || d.close_time))
+        .map(d => daysDiff(contratoEntryTime[d.id], d.won_time || d.close_time))
+    );
+
+    // 7. Transitions array — 4 transições do funil principal
+    const transitionLabels = [
+      { from: 'MQL', to: 'SQL' },
+      { from: 'SQL', to: 'Reunião' },
+      { from: 'Reunião', to: 'Proposta' },
+      { from: 'Proposta', to: 'Venda' },
+    ];
+    const milestoneCounts = [total, sqlCount, reuniaoCount, propostaCount, wonCount];
+
+    const transitions = transitionLabels.map((t, i) => ({
+      ...t,
+      convRate: convRates[i],
+      avgCycleDays: cycleTimes[i],
+      fromCount: milestoneCounts[i],
+      toCount: milestoneCounts[i + 1],
+    }));
+
+    // 8. Open deals por stage (5 linhas na tabela)
+    const openDeals = deals.filter(d => d.status === 'open');
+    const stageGroups = [
+      { key: 'mql', label: 'MQL', ids: new Set(STAGE_IDS.MQL), transIdx: 0 },
+      { key: 'sql', label: 'SQL', ids: new Set(STAGE_IDS.SQL), transIdx: 1 },
+      { key: 'reuniao', label: 'Reunião Agendada', ids: new Set(STAGE_IDS.REUNIAO_AGENDADA), transIdx: 2 },
+      { key: 'proposta', label: 'Proposta Feita', ids: new Set(STAGE_IDS.PROPOSTA), transIdx: 3 },
+      { key: 'contrato', label: 'Contrato Enviado', ids: new Set(STAGE_IDS.CONTRATO_ENVIADO), transIdx: -1 },
+    ];
+
+    const stages = stageGroups.map((group) => {
+      const stageDeals = openDeals.filter(d => group.ids.has(d.stage_id));
+      const count = stageDeals.length;
+      const value = stageDeals.reduce((acc, d) => acc + (d.value || 0), 0);
+
+      if (group.key === 'contrato') {
+        // Contrato: usa taxa direta Contrato→Venda (já passou por Proposta)
+        return {
+          key: group.key,
+          label: group.label,
+          openDeals: count,
+          pipelineValue: value,
+          convToSale: convContratoVenda,
+          daysToSale: cycleContratoVenda != null ? Math.round(cycleContratoVenda) : null,
+          expectedSales: convContratoVenda != null ? count * convContratoVenda : null,
+          expectedRevenue: convContratoVenda != null ? value * convContratoVenda : null,
+          stepConvRate: convContratoVenda,
+          stepCycleDays: cycleContratoVenda,
+        };
+      }
+
+      // Cascata: multiplica taxas a partir do transIdx deste stage
+      let cascadingConv = 1;
+      let cascadingDays = 0;
+      let hasNull = false;
+      for (let i = group.transIdx; i < convRates.length; i++) {
+        if (convRates[i] == null) { hasNull = true; break; }
+        cascadingConv *= convRates[i];
+        cascadingDays += cycleTimes[i] ?? 0;
+      }
+
+      return {
+        key: group.key,
+        label: group.label,
+        openDeals: count,
+        pipelineValue: value,
+        convToSale: hasNull ? null : cascadingConv,
+        daysToSale: hasNull ? null : Math.round(cascadingDays),
+        expectedSales: hasNull ? null : count * cascadingConv,
+        expectedRevenue: hasNull ? null : value * cascadingConv,
+        stepConvRate: convRates[group.transIdx] ?? null,
+        stepCycleDays: cycleTimes[group.transIdx] ?? null,
+      };
+    });
+
+    // 9. Bottleneck: menor taxa de conversão entre as 4 transições
+    let bottleneckIdx = -1;
+    for (let i = 0; i < transitions.length; i++) {
+      if (transitions[i].convRate == null) continue;
+      if (bottleneckIdx === -1 || transitions[i].convRate < transitions[bottleneckIdx].convRate) {
+        bottleneckIdx = i;
+      }
+    }
+
+    return { transitions, stages, bottleneckIdx };
+  } catch (err) {
+    console.error('[gerencialService] fetchForecastData error:', err);
+    return null;
+  }
+}
+
+/**
+ * Extrai base de deals ativos por etapa do forecast.
+ * Retorna { mql: [...], sql: [...], reuniao: [...], proposta: [...], contrato: [...] }
+ * Cada deal: { title, person_name, person_email, person_phone, value, stage_name, etapa }
+ */
+export async function fetchForecastStageDeals(funnel) {
+  try {
+    let query = supabase.from('crm_deals')
+      .select('title, person_name, person_email, person_phone, value, stage_id, stage_name, pipeline_id, deal_created_at')
+      .eq('status', 'open')
+      .gte('deal_created_at', DATA_START_DATE);
+    query = applyFunnelFilter(query, funnel);
+    const { data: deals, error } = await query;
+    if (error) throw error;
+    if (!deals?.length) return {};
+
+    // Inverter PIPELINE_FUNNELS para pipeline_id → label
+    const pipelineToFunnel = {};
+    for (const [key, ids] of Object.entries(PIPELINE_FUNNELS)) {
+      const label = FUNNEL_LABELS[key] ?? key;
+      for (const id of ids) pipelineToFunnel[id] = label;
+    }
+
+    const stageMap = [
+      { key: 'mql', label: 'MQL', ids: new Set(STAGE_IDS.MQL) },
+      { key: 'sql', label: 'SQL', ids: new Set(STAGE_IDS.SQL) },
+      { key: 'reuniao', label: 'Reunião Agendada', ids: new Set(STAGE_IDS.REUNIAO_AGENDADA) },
+      { key: 'proposta', label: 'Proposta Feita', ids: new Set(STAGE_IDS.PROPOSTA) },
+      { key: 'contrato', label: 'Contrato Enviado', ids: new Set(STAGE_IDS.CONTRATO_ENVIADO) },
+    ];
+
+    const result = {};
+    for (const group of stageMap) {
+      result[group.key] = deals
+        .filter(d => group.ids.has(d.stage_id))
+        .map(d => ({
+          title: d.title ?? '—',
+          person_name: d.person_name ?? '—',
+          person_email: d.person_email ?? '—',
+          person_phone: d.person_phone ?? '—',
+          value: d.value ?? 0,
+          deal_created_at: d.deal_created_at ?? '—',
+          stage_name: d.stage_name ?? '—',
+          funil: pipelineToFunnel[d.pipeline_id] ?? `Pipeline ${d.pipeline_id}`,
+          etapa: group.label,
+        }));
+    }
+    return result;
+  } catch (err) {
+    console.error('[gerencialService] fetchForecastStageDeals error:', err);
+    return {};
   }
 }
 

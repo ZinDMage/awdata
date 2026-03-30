@@ -3,9 +3,10 @@ import { useGerencial } from '@/contexts/GerencialContext';
 import { STAGE_TABS, STAGE_IDS, FUNNEL_LABELS, CUSTOM_FIELDS, parseCustomFields } from '@/config/pipedrive';
 import { getTabColumns } from '@/config/gerencialTabs';
 import { computeStageData } from '@/utils/stageMetrics';
-import { fetchAdSpend, fetchPropostaCycleData, fetchHistoricalConvRate, fetchMqlContext, fetchSqlContext } from '@/services/gerencialService';
+import { fetchAdSpend, fetchPropostaCycleData, fetchHistoricalConvRate, fetchMqlContext, fetchSqlContext, fetchForecastData } from '@/services/gerencialService';
 import { classifyLead } from '@/services/classificationService';
 import BowtieChart from './BowtieChart';
+import ForecastPanel from './ForecastPanel';
 import StageTabBar from './StageTabBar';
 import StageView from './StageView';
 import EmptyState from './EmptyState';
@@ -255,6 +256,21 @@ export default function GerencialView() {
     tabData,
   } = useGerencial();
 
+  // Forecast: previsibilidade de receita (carrega no bowtie)
+  const [forecastData, setForecastData] = useState(null);
+  const [forecastLoading, setForecastLoading] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setForecastLoading(true);
+    fetchForecastData(selectedFunnel).then(data => {
+      if (!cancelled) { setForecastData(data); setForecastLoading(false); }
+    }).catch(err => {
+      console.error('[GerencialView] forecast fetch error:', err);
+      if (!cancelled) { setForecastData(null); setForecastLoading(false); }
+    });
+    return () => { cancelled = true; };
+  }, [selectedFunnel]);
+
   // P3: Ref para fade transition entre sub-abas
   const [fadeIn, setFadeIn] = useState(true);
   const prevTabRef = useRef(activeTab);
@@ -343,6 +359,9 @@ export default function GerencialView() {
                   avgTimes={bowtieData.data?.avgTimes ?? []}
                   onStageClick={handleStageClick}
                 />
+
+                {/* Previsibilidade de Receita */}
+                <ForecastPanel data={forecastData} loading={forecastLoading} selectedFunnel={selectedFunnel} />
               </div>
             )}
           </>

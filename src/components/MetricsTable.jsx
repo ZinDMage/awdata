@@ -270,7 +270,7 @@ export default function MetricsTable({ data, aggData, colKeys, colLabels, mode, 
 
                         // Story 5-3 D3: numeric delta variation in days for dt section
                         const deltaVarDays = sec.id === "dt" && val != null && prev != null
-                          ? Math.round(val - prev)
+                          ? +(val - prev).toFixed(2)
                           : null;
 
                         return (
@@ -286,7 +286,7 @@ export default function MetricsTable({ data, aggData, colKeys, colLabels, mode, 
                             <span title={val == null ? "Dado não disponível para este período" : undefined}>{row.fmt(val)}</span>
                             {deltaVarDays !== null && deltaVarDays !== 0 && (
                               <span style={{ fontSize: 10, marginLeft: 4, color: deltaVarDays > 0 ? "var(--color-negative)" : "var(--color-positive)", fontWeight: 500 }}>
-                                {deltaVarDays > 0 ? `+${deltaVarDays}d` : `${deltaVarDays}d`}
+                                {deltaVarDays > 0 ? `+${deltaVarDays.toFixed(2)}d` : `${deltaVarDays.toFixed(2)}d`}
                               </span>
                             )}
                             <Arrow val={d} inv={row.inv} />

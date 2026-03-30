@@ -434,14 +434,10 @@ export const fetchMonthlyMetrics = async () => {
               STAGE_IDS.SQL.includes(t.to_stage_id) && t.time_in_previous_stage_sec
             );
 
-            // 2. SQL → Reunião Agendada
-            const meetingTransition = dealTransitions.find(t =>
-              STAGE_IDS.REUNIAO_AGENDADA.includes(t.to_stage_id) && t.time_in_previous_stage_sec
-            );
-            if (meetingTransition) {
-              const secVal = Number(meetingTransition.time_in_previous_stage_sec);
-              if (!isNaN(secVal)) {
-                const dSr = Math.round(secVal / (60 * 60 * 24));
+            // 2. Data Qualificação → Reunião Agendada (para SQLs)
+            if (dataQualificacao && agendamentoDate) {
+              const dSr = daysDiff(dataQualificacao, agendamentoDate);
+              if (dSr !== null) {
                 deltaM._deltas.sr.push(dSr);
                 if (baseWk && deltaM.wk[baseWk]) deltaM.wk[baseWk]._deltas.sr.push(dSr);
                 if (deltaMf) { deltaMf._deltas.sr.push(dSr); if (baseWk && deltaMf.wk[baseWk]) deltaMf.wk[baseWk]._deltas.sr.push(dSr); }
