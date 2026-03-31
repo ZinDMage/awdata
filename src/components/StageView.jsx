@@ -3,7 +3,7 @@ import DonutChart from './DonutChart';
 import BarChart from './BarChart';
 import DealsTable from './DealsTable';
 
-export default function StageView({ kpis, charts, columns, deals, sections, onRowClick }) {
+export default function StageView({ kpis, charts, columns, deals, sections, onRowClick, afterCharts }) {
   return (
     <div className="flex flex-col gap-8">
       {/* 1. KPI Cards */}
@@ -20,6 +20,9 @@ export default function StageView({ kpis, charts, columns, deals, sections, onRo
           )}
         </div>
       )}
+
+      {/* 2.5. Optional content after charts (e.g. LossMatrix) */}
+      {afterCharts}
 
       {/* 3. Deals table OR sections (Reuniao dual-section FR65) */}
       {sections && sections.length > 0 ? (

@@ -8,9 +8,10 @@
 export const STAGE_IDS = {
   MQL: [1, 49],
   SQL: [19, 50, 53, 35],
-  REUNIAO_AGENDADA: [3, 11, 45, 51, 37, 55, 58],
-  PROPOSTA: [4, 46, 39, 59],
-  CONTRATO_ENVIADO: [41, 47, 40, 60],
+  REUNIAO_AGENDADA: [3, 11, 45, 51, 37, 55, 58, 64, 65],
+  REAGENDAMENTO_PENDENTE: [6, 38, 48, 56],
+  PROPOSTA: [4, 46, 39, 59, 66],
+  CONTRATO_ENVIADO: [41, 47, 40, 60, 67],
 };
 // Derivado automaticamente para evitar divergência manual
 STAGE_IDS.PIPELINE_TOTAL = [

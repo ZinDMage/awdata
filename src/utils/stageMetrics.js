@@ -5,7 +5,7 @@
  */
 
 import { F } from '@/utils/formatters';
-import { CUSTOM_FIELDS, parseCustomFields } from '@/config/pipedrive';
+import { CUSTOM_FIELDS, parseCustomFields, STAGE_IDS } from '@/config/pipedrive';
 
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -176,7 +176,10 @@ function buildRevenueForecastBar(deals, avgCycleDays, convRate) {
   }
 
   const bucketMap = {};
-  for (const b of buckets) bucketMap[b.dateKey] = b;
+  for (const b of buckets) {
+    b.deals = [];
+    bucketMap[b.dateKey] = b;
+  }
 
   for (const deal of deals) {
     const propDate = deal.data_proposta;
@@ -186,7 +189,16 @@ function buildRevenueForecastBar(deals, avgCycleDays, convRate) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) continue;
     const expectedKey = addDays(raw, roundedCycle);
     if (bucketMap[expectedKey]) {
-      bucketMap[expectedKey].value += (deal.value ?? deal.deal_value ?? 0) * multiplier;
+      const dealValue = (deal.value ?? deal.deal_value ?? 0);
+      bucketMap[expectedKey].value += dealValue * multiplier;
+      bucketMap[expectedKey].deals.push({
+        title: deal.title ?? deal.person_name ?? deal.person_email ?? '—',
+        person_email: deal.person_email ?? '—',
+        value: dealValue,
+        expectedValue: dealValue * multiplier,
+        data_proposta: raw,
+        expectedDate: expectedKey,
+      });
     }
   }
 
@@ -194,6 +206,7 @@ function buildRevenueForecastBar(deals, avgCycleDays, convRate) {
     label: b.label,
     value: b.value,
     color: '#3B82F6',
+    deals: b.deals,
   }));
 
   return {
@@ -520,29 +533,52 @@ function resultadoKpis(deals) {
 
 // ── Per-tab Chart builders ──────────────────────────────────────────────────
 
+/** Logical stage groups for the perda bar chart — matches LossMatrix columns */
+const PERDA_STAGE_GROUPS = [
+  { label: 'Lead (MQL)',              icon: '👤', ids: new Set(STAGE_IDS.MQL),                      color: '#3B82F6' },
+  { label: 'Lead Qualificado (SQL)',   icon: '👤', ids: new Set(STAGE_IDS.SQL),                      color: '#10B981' },
+  { label: 'Reunião Agendada',         icon: '📅', ids: new Set(STAGE_IDS.REUNIAO_AGENDADA),         color: '#F59E0B' },
+  { label: 'Reagendamento Pendente',   icon: '🚫', ids: new Set(STAGE_IDS.REAGENDAMENTO_PENDENTE),   color: '#FF9500' },
+  { label: 'Proposta feita',           icon: '📝', ids: new Set(STAGE_IDS.PROPOSTA),                 color: '#8B5CF6' },
+  { label: 'Contrato Enviado',         icon: '📄', ids: new Set(STAGE_IDS.CONTRATO_ENVIADO),         color: '#06B6D4' },
+];
+
+function classifyPerdaStage(stageId) {
+  for (let i = 0; i < PERDA_STAGE_GROUPS.length; i++) {
+    if (PERDA_STAGE_GROUPS[i].ids.has(stageId)) return i;
+  }
+  return -1;
+}
+
 function perdaCharts(deals) {
   // Donut by mercado/segmento
   const donut = buildDonut(deals, 'mercado', 'Distribuição por Mercado', 'Perdas por segmento');
 
-  // Bar by stage_name
+  // Bar grouped by logical stage (aligned with LossMatrix)
   if (!deals.length) return { donut, bar: null };
 
-  const freq = {};
+  const counts = PERDA_STAGE_GROUPS.map(() => 0);
+  let outros = 0;
+
   for (const d of deals) {
-    const sn = d.stage_name ?? 'Desconhecido';
-    freq[sn] = (freq[sn] ?? 0) + 1;
+    const idx = classifyPerdaStage(d.stage_id);
+    if (idx >= 0) counts[idx]++;
+    else outros++;
   }
-  const sorted = Object.entries(freq).sort((a, b) => b[1] - a[1]);
-  const bars = sorted.map(([label, value], i) => ({
-    label,
-    value,
-    color: DONUT_COLORS[i % DONUT_COLORS.length],
+
+  const bars = PERDA_STAGE_GROUPS.map((g, i) => ({
+    label: `${g.icon} ${g.label}`,
+    value: counts[i],
+    color: g.color,
   }));
+  if (outros > 0) {
+    bars.push({ label: 'Outros', value: outros, color: DONUT_COLORS[7] });
+  }
 
   const bar = {
     bars,
     title: 'Perdas por Etapa',
-    subtitle: 'Distribuição de perdas por stage',
+    subtitle: 'Distribuição de perdas por grupo de stage',
     mode: 'default',
   };
 

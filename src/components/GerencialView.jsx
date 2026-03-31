@@ -9,6 +9,7 @@ import BowtieChart from './BowtieChart';
 import ForecastPanel from './ForecastPanel';
 import StageTabBar from './StageTabBar';
 import StageView from './StageView';
+import LossMatrix from './LossMatrix';
 import EmptyState from './EmptyState';
 import SkeletonLoader from './SkeletonLoader';
 
@@ -238,6 +239,7 @@ function StageViewWithData({ activeTab, deals, bowtieStages }) {
       columns={columns}
       deals={filteredDeals}
       sections={sections}
+      afterCharts={activeTab === 'perda' ? <LossMatrix deals={filteredDeals} /> : undefined}
     />
   );
 }

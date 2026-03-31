@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/webhook/yayforms.js": {
+      "maxDuration": 60
+    }
+  }
+}
