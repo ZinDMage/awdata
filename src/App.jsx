@@ -4,6 +4,7 @@ import { MetricsProvider } from '@/contexts/MetricsContext';
 import Dashboard from '@/components/Dashboard';
 import Login from '@/components/Login';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import { Analytics } from '@vercel/analytics/react';
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -100,6 +101,7 @@ export default function App() {
       <MetricsProvider>
         <Dashboard session={session} />
       </MetricsProvider>
+      <Analytics />
     </ErrorBoundary>
   );
 }
