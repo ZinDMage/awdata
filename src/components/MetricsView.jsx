@@ -2,8 +2,7 @@ import { useMemo, useCallback } from 'react';
 import { useMetrics } from '../contexts/MetricsContext';
 import { F, res, dlt } from '../utils/formatters';
 import { mergeFunnelData, agr, prevM, prevPeriod, prevPeriodLabel } from '../utils/calculations';
-import FilterBar from './FilterBar';
-import MonthSelector from './MonthSelector';
+import MetricsNavBar from './MetricsNavBar';
 import KpiCards from './KpiCards';
 import MetricsTable from './MetricsTable';
 import LossCharts from './LossCharts';
@@ -84,8 +83,7 @@ export default function MetricsView({ dk }) {
 
   return (
     <>
-      <FilterBar dk={dk} />
-      <MonthSelector />
+      <MetricsNavBar dk={dk} />
       <KpiCards kpis={kpis} dk={dk} compLabel={kpis.compLabel} />
       <MetricsTable
         data={data}

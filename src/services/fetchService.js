@@ -6,6 +6,10 @@ import { supabase } from './supabaseClient';
  * Errors per table don't crash the app (NFR12).
  */
 export async function fetchAll(table, selectStr) {
+  // AD-V2-1: Nunca select('*') — NFR22
+  if (!selectStr || selectStr.includes('*')) {
+    console.warn(`[fetchAll] ⚠️ select("*") detectado para tabela "${table}" — use colunas explícitas (QUERY_COLUMNS)`);
+  }
   let all = [];
   let from = 0;
   const size = 1000;

@@ -58,3 +58,7 @@ _bmad-output/
 docs/
 .omc/
 src/__mocks__/
+
+# Agent/plugin skills (local tooling)
+.agent/
+.gemini/

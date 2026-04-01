@@ -5,10 +5,12 @@ import {
   PIPELINE_FUNNELS,
   FUNNEL_LABELS,
   getFunnelKey,
-  parseCustomFields,
+
 } from '@/config/pipedrive';
+import { JSONB_FIELDS } from '@/config/queryColumns'; // AD-V2-9
 import { fetchAll } from './fetchService';
 import { classifyLead } from './classificationService';
+import { cachedQuery } from '@/services/queryCache'; // AD-V2-8
 
 /**
  * Data Service for Dash AwSales
@@ -30,8 +32,9 @@ export const FUNNEL_CONFIG = {
   revenueleakage: { label: 'Revenue Leakage',  pipelines: PIPELINE_FUNNELS.revenueleakage, hasSpending: false },
 };
 
-export const fetchMonthlyMetrics = async () => {
-  try {
+export const fetchMonthlyMetrics = () => {
+  return cachedQuery('metrics', async () => {
+    try {
     const TABLE_NAMES = ['sales', 'meta_ads_costs', 'google_ads_costs', 'meta_ads_actions', 'yayforms_responses', 'crm_deals', 'crm_stage_transitions'];
     const settled = await Promise.allSettled([
       fetchAll('sales', 'id, receita_gerada, data_fechamento, status, email_pipedrive, email_stripe'),
@@ -39,7 +42,7 @@ export const fetchMonthlyMetrics = async () => {
       fetchAll('google_ads_costs', 'spend, impressions, clicks, conversions, date'),
       fetchAll('meta_ads_actions', 'action_type, value, date_start'),
       fetchAll('yayforms_responses', 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market'),
-      fetchAll('crm_deals', 'deal_created_at, stage_id, pipeline_id, status, value, custom_fields, person_email, won_time, deal_id, lost_reason'),
+      fetchAll('crm_deals', `deal_created_at, stage_id, pipeline_id, status, value, person_email, won_time, deal_id, lost_reason, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}, ${JSONB_FIELDS.DATA_QUALIFICACAO}`),
       fetchAll('crm_stage_transitions', 'deal_id, to_stage_id, time_in_previous_stage_sec')
     ]);
 
@@ -347,16 +350,15 @@ export const fetchMonthlyMetrics = async () => {
             }
           }
 
-          // FR22: parseCustomFields always returns {} for null/invalid — safe to index
-          const cj = parseCustomFields(d.custom_fields);
+          // AD-V2-9: JSONB extraction — campos custom já top-level via aliases cf_*
           // AC2: SQL_FLAG absent/null/undefined => isSQL defaults to false (no false positive)
-          const isSQL = (cj[CUSTOM_FIELDS.SQL_FLAG.key] ?? null) == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+          const isSQL = (d.cf_sql_flag ?? null) == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
 
           if (isSQL) {
             // ── SQL date (mode-aware) ──
             let sqlMk, sqlWk;
             if (mode === 'performance') {
-              const dataQual = cj[CUSTOM_FIELDS.DATA_QUALIFICACAO.key];
+              const dataQual = d.cf_data_qualificacao;
               sqlMk = (dataQual && getMonthKey(dataQual)) || baseMk;
               sqlWk = (dataQual && getWeekKey(dataQual)) || baseWk;
             } else {
@@ -371,7 +373,7 @@ export const fetchMonthlyMetrics = async () => {
             if (sqlMf) updateMetrics(sqlMf, d, 1, 'n', 'sql', sqlWk);
 
             // ── Reunião agendada (mode-aware) ──
-            const agendamentoDate = cj[CUSTOM_FIELDS.DATA_REUNIAO.key];
+            const agendamentoDate = d.cf_data_reuniao;
             if (agendamentoDate && agendamentoDate !== '') {
               let rAgMk, rAgWk;
               if (mode === 'performance') {
@@ -389,7 +391,7 @@ export const fetchMonthlyMetrics = async () => {
 
             // ── Reunião realizada (mode-aware) ──
             // AC5: REUNIAO_REALIZADA absent/null/undefined => reuniaoRealizada defaults to false
-            const reuniaoRealizada = (cj[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] ?? null) == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
+            const reuniaoRealizada = (d.cf_reuniao_realizada ?? null) == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
             if (reuniaoRealizada) {
               let rReMk, rReWk;
               if (mode === 'performance') {
@@ -420,7 +422,7 @@ export const fetchMonthlyMetrics = async () => {
             const saleDate = dealEmail ? saleDateByEmail[dealEmail] : null;
 
             // 1. MQL → SQL
-            const dataQualificacao = cj[CUSTOM_FIELDS.DATA_QUALIFICACAO.key];
+            const dataQualificacao = d.cf_data_qualificacao;
             if (dataQualificacao && d.deal_created_at) {
               const dMs = daysDiff(d.deal_created_at, dataQualificacao);
               if (dMs !== null) {
@@ -543,6 +545,7 @@ export const fetchMonthlyMetrics = async () => {
     console.error("Critical error in data service:", err);
     throw err;
   }
+  }, 30 * 60 * 1000); // 30 min TTL — AD-V2-8
 };
 
 export const fetchLossReasons = async () => {

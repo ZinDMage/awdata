@@ -1,5 +1,6 @@
 import { normalizeEmail } from '@/services/fetchService';
 import { parseCustomFields } from '@/config/pipedrive';
+import { cachedQuery } from '@/services/queryCache'; // AD-V2-8
 
 // ── Campos sobrepostos YayForms ↔ Pipedrive Custom Fields (FR75) ──
 const OVERLAPPING_FIELDS = [
@@ -33,72 +34,93 @@ export async function resolveBatch(deals, supabaseClient) {
   if (!deals?.length) return deals ?? [];
 
   try {
-    // 1. Extrair emails normalizados de todos os deals
+    // 1. Extrair emails e telefones normalizados de todos os deals
     const emailSet = new Set();
+    const phoneSet = new Set();
     for (const deal of deals) {
       const email = normalizeEmail(deal.person_email);
       if (email) emailSet.add(email);
+      const phone = normalizePhone(deal.person_phone);
+      if (phone) phoneSet.add(phone);
     }
     const emails = [...emailSet];
-
-    // 2. Batch query por email
-    let submissions = [];
-    if (emails.length > 0) {
-      const { data, error } = await supabaseClient
-        .from('yayforms_responses')
-        .select('lead_email, lead_phone, lead_market, lead_segment, lead_revenue_range, lead_monthly_volume, time_to_complete_sec, created_at')
-        .in('lead_email', emails);
-      if (!error && data) submissions = data;
-    }
-
-    // 3. Montar mapa email → submissões (ordenadas por created_at DESC)
-    const emailMap = {};
-    for (const sub of submissions) {
-      const key = normalizeEmail(sub.lead_email);
-      if (!key) continue;
-      if (!emailMap[key]) emailMap[key] = [];
-      emailMap[key].push(sub);
-    }
-    for (const key of Object.keys(emailMap)) {
-      emailMap[key].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
-    }
-
-    // 4. Extrair telefones de deals sem match por email
-    const phoneSet = new Set();
-    const dealsNeedPhone = [];
-    for (const deal of deals) {
-      const email = normalizeEmail(deal.person_email);
-      if (!email || !emailMap[email]) {
-        const phone = normalizePhone(deal.person_phone);
-        if (phone) {
-          phoneSet.add(phone);
-          dealsNeedPhone.push(deal);
-        }
-      }
-    }
-
-    // 5. Batch query por telefone (se necessário)
-    let phoneMap = {};
     const phones = [...phoneSet];
-    if (phones.length > 0) {
-      const { data, error } = await supabaseClient
-        .from('yayforms_responses')
-        .select('lead_email, lead_phone, lead_market, lead_segment, lead_revenue_range, lead_monthly_volume, time_to_complete_sec, created_at')
-        .in('lead_phone', phones);
-      if (!error && data) {
-        for (const sub of data) {
-          const key = normalizePhone(sub.lead_phone);
-          if (!key) continue;
-          if (!phoneMap[key]) phoneMap[key] = [];
-          phoneMap[key].push(sub);
-        }
-        for (const key of Object.keys(phoneMap)) {
-          phoneMap[key].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+
+    // Se não há emails nem telefones, bypass cache (nada a enriquecer via YayForms)
+    if (!emails.length && !phones.length) return deals;
+
+    // 2. Cache key determinística baseada nos emails e telefones (AD-V2-8)
+    const sortedEmails = emails.sort();
+    const emailKeyPart = sortedEmails.length > 50
+      ? sortedEmails.slice(0, 50).join(',') + `:+${sortedEmails.length}`
+      : sortedEmails.join(',');
+
+    const sortedPhones = phones.sort();
+    const phoneKeyPart = sortedPhones.length > 50
+      ? sortedPhones.slice(0, 50).join(',') + `:+${sortedPhones.length}`
+      : sortedPhones.join(',');
+
+    const cacheKey = `resolve:e=${emailKeyPart}|p=${phoneKeyPart}`;
+
+    // 3. Cachear apenas o lookup YayForms (emailMap + phoneMap) — 10 min TTL
+    const { emailMap, phoneMap } = await cachedQuery(cacheKey, async () => {
+      // Batch query por email
+      let submissions = [];
+      if (emails.length > 0) {
+        const { data, error } = await supabaseClient
+          .from('yayforms_responses')
+          .select('lead_email, lead_phone, lead_market, lead_segment, lead_revenue_range, lead_monthly_volume, time_to_complete_sec, created_at')
+          .in('lead_email', emails);
+        if (!error && data) submissions = data;
+      }
+
+      // Montar mapa email → submissões (ordenadas por created_at DESC)
+      const _emailMap = {};
+      for (const sub of submissions) {
+        const key = normalizeEmail(sub.lead_email);
+        if (!key) continue;
+        if (!_emailMap[key]) _emailMap[key] = [];
+        _emailMap[key].push(sub);
+      }
+      for (const key of Object.keys(_emailMap)) {
+        _emailMap[key].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+      }
+
+      // Extrair telefones de deals sem match por email
+      const fallbackPhoneSet = new Set();
+      for (const deal of deals) {
+        const email = normalizeEmail(deal.person_email);
+        if (!email || !_emailMap[email]) {
+          const phone = normalizePhone(deal.person_phone);
+          if (phone) fallbackPhoneSet.add(phone);
         }
       }
-    }
 
-    // 6. Para cada deal, resolver cada campo duplicado
+      // Batch query por telefone (se necessário)
+      const _phoneMap = {};
+      const fallbackPhones = [...fallbackPhoneSet];
+      if (fallbackPhones.length > 0) {
+        const { data, error } = await supabaseClient
+          .from('yayforms_responses')
+          .select('lead_email, lead_phone, lead_market, lead_segment, lead_revenue_range, lead_monthly_volume, time_to_complete_sec, created_at')
+          .in('lead_phone', fallbackPhones);
+        if (!error && data) {
+          for (const sub of data) {
+            const key = normalizePhone(sub.lead_phone);
+            if (!key) continue;
+            if (!_phoneMap[key]) _phoneMap[key] = [];
+            _phoneMap[key].push(sub);
+          }
+          for (const key of Object.keys(_phoneMap)) {
+            _phoneMap[key].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+          }
+        }
+      }
+
+      return { emailMap: _emailMap, phoneMap: _phoneMap };
+    }, 10 * 60 * 1000); // 10 min TTL — AD-V2-8
+
+    // 4. Resolução — sempre roda com deals atuais + maps cacheados
     return deals.map(deal => {
       const email = normalizeEmail(deal.person_email);
       const phone = normalizePhone(deal.person_phone);

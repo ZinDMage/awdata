@@ -1,4 +1,4 @@
-export default function Pill({ active, accent, disabled, onClick, children }) {
+export default function Pill({ active, accent, disabled, onClick, children, style }) {
   const isAccent = accent && active;
   return (
     <button
@@ -15,6 +15,7 @@ export default function Pill({ active, accent, disabled, onClick, children }) {
         opacity: disabled ? 0.3 : 1,
         pointerEvents: disabled ? "none" : "auto",
         transition: "all 300ms cubic-bezier(0.4,0,0.2,1)",
+        ...style,
       }}
     >{children}</button>
   );
