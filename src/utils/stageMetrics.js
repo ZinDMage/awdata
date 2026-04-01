@@ -117,7 +117,7 @@ function buildDonut(deals, field, title, subtitle = '') {
   }));
 
   if (otrosCount > 0) {
-    segments.push({ label: 'Outros', value: otrosCount, color: DONUT_COLORS[7] });
+    segments.push({ label: 'Outros', value: otrosCount, color: DONUT_COLORS[7] ?? '#8E8E93' });
   }
 
   return { segments, title, subtitle };
@@ -572,7 +572,7 @@ function perdaCharts(deals) {
     color: g.color,
   }));
   if (outros > 0) {
-    bars.push({ label: 'Outros', value: outros, color: DONUT_COLORS[7] });
+    bars.push({ label: 'Outros', value: outros, color: DONUT_COLORS[7] ?? '#8E8E93' });
   }
 
   const bar = {

@@ -1,8 +1,10 @@
 import { supabase } from './supabaseClient';
-import { STAGE_TABS, STAGE_IDS, CUSTOM_FIELDS, PIPELINE_FUNNELS, FUNNEL_LABELS, parseCustomFields } from '@/config/pipedrive';
+import { STAGE_TABS, STAGE_IDS, CUSTOM_FIELDS, PIPELINE_FUNNELS, FUNNEL_LABELS } from '@/config/pipedrive';
+import { JSONB_FIELDS } from '@/config/queryColumns'; // AD-V2-9
 import { resolveBatch } from '@/utils/dataPrecedence';
 import { classifyLead } from '@/services/classificationService';
 import { normalizeEmail, deduplicateYayforms, fetchAll } from '@/services/fetchService';
+import { cachedQuery } from '@/services/queryCache'; // AD-V2-8
 
 // ── Data mínima: só trabalhamos com dados a partir de 2026 ──
 const DATA_START_DATE = '2026-01-01';
@@ -27,6 +29,22 @@ async function paginatedQuery(buildQuery) {
   return all;
 }
 
+/**
+ * Helper: executa query paginada com .in() chunked para evitar limite de URL.
+ * Divide o array de valores em batches de CHUNK_SIZE e concatena resultados.
+ */
+const IN_CHUNK_SIZE = 200;
+async function chunkedPaginatedQuery(buildQueryWithChunk, values) {
+  if (!values?.length) return [];
+  let all = [];
+  for (let i = 0; i < values.length; i += IN_CHUNK_SIZE) {
+    const chunk = values.slice(i, i + IN_CHUNK_SIZE);
+    const results = await paginatedQuery(() => buildQueryWithChunk(chunk));
+    all = all.concat(results);
+  }
+  return all;
+}
+
 // ── Bowtie funnel stages (7 stages, cumulative progression) ──
 const BOWTIE_STAGES = [
   { key: 'lead',          label: 'Lead' },
@@ -37,6 +55,17 @@ const BOWTIE_STAGES = [
   { key: 'vendas',        label: 'Pagamentos Realizados' },
   { key: 'contrato',      label: 'Contrato Enviado' },
 ];
+
+// ── Helper: converte funnel key para array de pipeline_ids (para RPCs) ──
+function getFunnelPipelineIds(funnel) {
+  if (!funnel || funnel === 'todos') return null; // NULL = sem filtro na RPC
+  const ids = PIPELINE_FUNNELS[funnel];
+  if (!ids?.length) {
+    console.warn(`[gerencialService] Unknown funnel for RPC: ${funnel}`);
+    return null;
+  }
+  return ids;
+}
 
 // ── Helper: aplica filtro de funil na query ──
 function applyFunnelFilter(query, funnel) {
@@ -51,21 +80,141 @@ function applyFunnelFilter(query, funnel) {
  * Deals agrupados por stage, com contagens, conversões e tempos médios.
  */
 export async function fetchBowtieData(startMonth, endMonth, funnel) {
+  return cachedQuery(`bowtie:${startMonth}:${endMonth}:${funnel || 'todos'}`, async () => {
   try {
-    const deals = await paginatedQuery(() => {
-      let q = supabase
-        .from('crm_deals')
-        .select('id, stage_id, stage_name, status, deal_created_at, close_time, value, pipeline_id, custom_fields, person_email')
-        .gte('deal_created_at', `${startMonth}-01`)
-        .lt('deal_created_at', getNextMonth(endMonth));
-      return applyFunnelFilter(q, funnel);
-    });
-    if (!deals?.length) return { stages: [], conversions: [], avgTimes: [] };
+    const pipelineIds = getFunnelPipelineIds(funnel);
 
-    // Contagem cumulativa: quantos deals do período passaram por cada etapa
+    // ── Tentar RPC para counts SQL-only + avgTimes (Story 5.4) ──
+    let rpcCounts = null;
+    let rpcAvgTimes = null;
+    try {
+      const { data, error } = await supabase.rpc('get_bowtie_stats', {
+        p_start_month: startMonth,
+        p_end_month: endMonth,
+        p_pipeline_ids: pipelineIds
+      });
+      if (error) throw error;
+
+      rpcCounts = {};
+      rpcAvgTimes = {};
+      for (const row of data) {
+        rpcCounts[row.stage] = Number(row.count);
+        rpcAvgTimes[row.stage] = Number(row.avg_time_days);
+      }
+    } catch (rpcErr) {
+      console.warn('[gerencialService] RPC get_bowtie_stats failed, full fallback:', rpcErr);
+    }
+
+    // ── Se RPC falhou, fallback completo (método antigo) ──
+    if (!rpcCounts) {
+      const deals = await paginatedQuery(() => {
+        let q = supabase
+          .from('crm_deals')
+          .select(`id, stage_id, stage_name, status, deal_created_at, close_time, value, pipeline_id, person_email, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}`)
+          .gte('deal_created_at', `${startMonth}-01`)
+          .lt('deal_created_at', getNextMonth(endMonth));
+        return applyFunnelFilter(q, funnel);
+      });
+      if (!deals?.length) return { stages: [], conversions: [], avgTimes: [] };
+
+      const counts = { lead: 0, mql: 0, sql: 0, reuniao_ag: 0, reuniao_real: 0, vendas: 0, contrato: 0 };
+
+      const isInboundScope = !funnel || funnel === 'todos' || funnel === 'inbound';
+      if (isInboundScope) {
+        const yayData = await paginatedQuery(() =>
+          supabase
+            .from('yayforms_responses')
+            .select('lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market, submitted_at')
+            .gte('submitted_at', `${startMonth}-01`)
+            .lt('submitted_at', getNextMonth(endMonth))
+        );
+        if (yayData.length) {
+          const normalized = yayData.map(r => ({ ...r, lead_email: normalizeEmail(r.lead_email) }));
+          const deduped = deduplicateYayforms(normalized);
+          counts.lead = deduped.length;
+          counts.mql = deduped.filter(l =>
+            classifyLead(l.lead_revenue_range, l.lead_monthly_volume, l.lead_segment, l.lead_market) === 'MQL'
+          ).length;
+        }
+      }
+
+      if (funnel && funnel !== 'todos' && funnel !== 'inbound') {
+        counts.lead = deals.length;
+        counts.mql = deals.length;
+      }
+
+      if (funnel === 'todos') {
+        const nonInboundPipelines = [
+          ...(PIPELINE_FUNNELS.indicacao || []),
+          ...(PIPELINE_FUNNELS.wordwild || []),
+          ...(PIPELINE_FUNNELS.revenueleakage || []),
+        ];
+        const nonInboundDeals = deals.filter(d => nonInboundPipelines.includes(d.pipeline_id));
+        counts.lead += nonInboundDeals.length;
+        counts.mql += nonInboundDeals.length;
+      }
+
+      for (const deal of deals) {
+        const isSQL = deal.cf_sql_flag == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+        const hasReuniao = !!deal.cf_data_reuniao;
+        const reuniaoRealizada = deal.cf_reuniao_realizada == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
+        const inContratoStage = STAGE_IDS.CONTRATO_ENVIADO.includes(deal.stage_id);
+
+        if (isSQL) counts.sql++;
+        if (isSQL && hasReuniao) counts.reuniao_ag++;
+        if (isSQL && reuniaoRealizada) counts.reuniao_real++;
+        if (inContratoStage) counts.contrato++;
+      }
+
+      const dealEmails = deals.map(d => d.person_email?.trim()?.toLowerCase()).filter(Boolean);
+      if (dealEmails.length > 0) {
+        const uniqueEmails = [...new Set(dealEmails)];
+        const salesData = await chunkedPaginatedQuery(
+          (chunk) => supabase
+            .from('sales')
+            .select('email_pipedrive')
+            .in('email_pipedrive', chunk)
+            .gte('data_fechamento', `${startMonth}-01`)
+            .lt('data_fechamento', getNextMonth(endMonth)),
+          uniqueEmails
+        );
+        const salesEmails = new Set(salesData.map(s => s.email_pipedrive?.trim()?.toLowerCase()).filter(Boolean));
+        counts.vendas = deals.filter(d => {
+          const email = d.person_email?.trim()?.toLowerCase();
+          return email && salesEmails.has(email);
+        }).length;
+      } else {
+        counts.vendas = 0;
+      }
+
+      const stages = BOWTIE_STAGES.map(s => ({ name: s.label, count: counts[s.key] || 0 }));
+      const conversions = [];
+      for (let i = 1; i < stages.length; i++) {
+        const prev = stages[i - 1].count;
+        conversions.push(prev > 0 ? Math.round((stages[i].count / prev) * 100) : 0);
+      }
+
+      const dealIds = deals.map(d => d.id);
+      const transitions = await paginatedQuery(() =>
+        supabase
+          .from('crm_stage_transitions')
+          .select('deal_id, to_stage_id, time_in_previous_stage_sec')
+          .in('deal_id', dealIds)
+          .gte('transitioned_at', `${startMonth}-01`)
+          .lt('transitioned_at', getNextMonth(endMonth))
+      );
+      const avgTimes = computeBowtieAvgTimes(transitions);
+
+      const perda = deals.filter(d => d.status === 'lost').length;
+      const resultado = deals.filter(d => d.status === 'won').length;
+
+      return { stages, conversions, avgTimes, perda, resultado };
+    }
+
+    // ── RPC succeeded: approach híbrido ──
     const counts = { lead: 0, mql: 0, sql: 0, reuniao_ag: 0, reuniao_real: 0, vendas: 0, contrato: 0 };
 
-    // ── Lead e MQL: fonte primária é yayforms_responses (inbound) ──
+    // 1. Client-side: Lead + MQL (yayforms + classifyLead) — mantido
     const isInboundScope = !funnel || funnel === 'todos' || funnel === 'inbound';
     if (isInboundScope) {
       const yayData = await paginatedQuery(() =>
@@ -75,9 +224,7 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
           .gte('submitted_at', `${startMonth}-01`)
           .lt('submitted_at', getNextMonth(endMonth))
       );
-
       if (yayData.length) {
-        // Normalizar emails e deduplicar (mesma lógica do fetchService)
         const normalized = yayData.map(r => ({ ...r, lead_email: normalizeEmail(r.lead_email) }));
         const deduped = deduplicateYayforms(normalized);
         counts.lead = deduped.length;
@@ -87,102 +234,91 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
       }
     }
 
-    // Para funis não-inbound (indicação, wordwild), leads vêm do CRM
+    // Para funis não-inbound, leads vêm do CRM — query leve (só count)
     if (funnel && funnel !== 'todos' && funnel !== 'inbound') {
-      counts.lead = deals.length;
-      counts.mql = deals.length; // Todos os deals nesses funis são considerados MQL
+      const { count: dealCount } = await supabase
+        .from('crm_deals')
+        .select('id', { count: 'exact', head: true })
+        .gte('deal_created_at', `${startMonth}-01`)
+        .lt('deal_created_at', getNextMonth(endMonth))
+        .in('pipeline_id', pipelineIds || []);
+      counts.lead = dealCount || 0;
+      counts.mql = dealCount || 0;
     }
 
-    // Se 'todos', somar leads de funis não-inbound aos do yayforms
+    // Se 'todos', somar leads de funis não-inbound
     if (funnel === 'todos') {
       const nonInboundPipelines = [
         ...(PIPELINE_FUNNELS.indicacao || []),
         ...(PIPELINE_FUNNELS.wordwild || []),
         ...(PIPELINE_FUNNELS.revenueleakage || []),
       ];
-      const nonInboundDeals = deals.filter(d => nonInboundPipelines.includes(d.pipeline_id));
-      counts.lead += nonInboundDeals.length;
-      counts.mql += nonInboundDeals.length;
+      const { count: niCount } = await supabase
+        .from('crm_deals')
+        .select('id', { count: 'exact', head: true })
+        .gte('deal_created_at', `${startMonth}-01`)
+        .lt('deal_created_at', getNextMonth(endMonth))
+        .in('pipeline_id', nonInboundPipelines);
+      counts.lead += niCount || 0;
+      counts.mql += niCount || 0;
     }
 
-    // ── SQL+ stages: contados a partir de crm_deals ──
-    for (const deal of deals) {
-      const cf = parseCustomFields(deal.custom_fields);
-      const isSQL = cf[CUSTOM_FIELDS.SQL_FLAG.key] == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
-      const hasReuniao = !!(cf[CUSTOM_FIELDS.DATA_REUNIAO.key]);
-      const reuniaoRealizada = cf[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
-      const inContratoStage = STAGE_IDS.CONTRATO_ENVIADO.includes(deal.stage_id);
+    // 2. Merge counts SQL-only da RPC
+    counts.sql = rpcCounts.sql || 0;
+    counts.reuniao_ag = rpcCounts.reuniao_ag || 0;
+    counts.reuniao_real = rpcCounts.reuniao_real || 0;
+    counts.contrato = rpcCounts.contrato || 0;
+    const perda = rpcCounts.perda || 0;
+    const resultado = rpcCounts.resultado || 0;
 
-      // SQL: custom field SQL_FLAG = SIM
-      if (isSQL) counts.sql++;
-
-      // Reunião Agendada: exige isSQL + data_reuniao preenchido (cumulativo)
-      if (isSQL && hasReuniao) counts.reuniao_ag++;
-
-      // Reunião Realizada: exige isSQL + REUNIAO_REALIZADA = SIM (cumulativo)
-      if (isSQL && reuniaoRealizada) counts.reuniao_real++;
-
-      // Contrato Enviado: apenas deals no stage de contrato (por data de criação)
-      if (inContratoStage) counts.contrato++;
-    }
-
-    // Pagamentos Realizados: contar via tabela sales (join por email)
-    const dealEmails = deals
-      .map(d => d.person_email?.trim()?.toLowerCase())
-      .filter(Boolean);
+    // 3. Client-side: Vendas (join com sales por email) — mantido
+    const dealEmailsData = await paginatedQuery(() => {
+      let q = supabase
+        .from('crm_deals')
+        .select('person_email')
+        .gte('deal_created_at', `${startMonth}-01`)
+        .lt('deal_created_at', getNextMonth(endMonth));
+      return applyFunnelFilter(q, funnel);
+    });
+    const dealEmails = dealEmailsData.map(d => d.person_email?.trim()?.toLowerCase()).filter(Boolean);
 
     if (dealEmails.length > 0) {
       const uniqueEmails = [...new Set(dealEmails)];
-      const salesData = await paginatedQuery(() =>
-        supabase
+      const salesData = await chunkedPaginatedQuery(
+        (chunk) => supabase
           .from('sales')
           .select('email_pipedrive')
-          .in('email_pipedrive', uniqueEmails)
+          .in('email_pipedrive', chunk)
           .gte('data_fechamento', `${startMonth}-01`)
-          .lt('data_fechamento', getNextMonth(endMonth))
+          .lt('data_fechamento', getNextMonth(endMonth)),
+        uniqueEmails
       );
-
       const salesEmails = new Set(salesData.map(s => s.email_pipedrive?.trim()?.toLowerCase()).filter(Boolean));
-      counts.vendas = deals.filter(d => {
+      counts.vendas = dealEmailsData.filter(d => {
         const email = d.person_email?.trim()?.toLowerCase();
         return email && salesEmails.has(email);
       }).length;
-    } else {
-      counts.vendas = 0;
     }
 
-    const stages = BOWTIE_STAGES.map(s => ({
-      name: s.label,
-      count: counts[s.key] || 0,
-    }));
+    // 4. Montar stages + conversions + avgTimes
+    const stages = BOWTIE_STAGES.map(s => ({ name: s.label, count: counts[s.key] || 0 }));
 
-    // Conversões entre etapas sequenciais
     const conversions = [];
     for (let i = 1; i < stages.length; i++) {
       const prev = stages[i - 1].count;
       conversions.push(prev > 0 ? Math.round((stages[i].count / prev) * 100) : 0);
     }
 
-    // Tempo médio por stage via transitions
-    const dealIds = deals.map(d => d.id);
-    const transitions = await paginatedQuery(() =>
-      supabase
-        .from('crm_stage_transitions')
-        .select('deal_id, to_stage_id, time_in_previous_stage_sec')
-        .in('deal_id', dealIds)
-        .gte('transitioned_at', `${startMonth}-01`)
-        .lt('transitioned_at', getNextMonth(endMonth))
-    );
-    const avgTimes = computeBowtieAvgTimes(transitions);
-
-    const perda = deals.filter(d => d.status === 'lost').length;
-    const resultado = deals.filter(d => d.status === 'won').length;
+    // avgTimes da RPC (mapeados para BOWTIE_STAGES order)
+    const bowtieKeys = ['lead', 'mql', 'sql', 'reuniao_ag', 'reuniao_real', 'vendas', 'contrato'];
+    const avgTimes = bowtieKeys.map(k => rpcAvgTimes[k] || 0);
 
     return { stages, conversions, avgTimes, perda, resultado };
   } catch (err) {
     console.error('[gerencialService] fetchBowtieData error:', err);
     return { stages: [], conversions: [], avgTimes: [], perda: 0, resultado: 0 };
   }
+  }, 5 * 60 * 1000); // 5 min TTL — AD-V2-8
 }
 
 /**
@@ -191,8 +327,10 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
  * tabKey: chave da STAGE_TABS (para identificar perda/resultado)
  */
 export async function fetchStageDeals(stageIds, funnel, tabKey) {
+  const sortedIds = stageIds ? [...stageIds].sort().join(',') : '';
+  return cachedQuery(`deals:${sortedIds}:${funnel || 'todos'}:${tabKey}`, async () => {
   try {
-    let query = supabase.from('crm_deals').select('*');
+    let query = supabase.from('crm_deals').select('id, title, person_name, person_email, person_phone, value, stage_id, stage_name, status, pipeline_id, deal_created_at, close_time, lost_time, lost_reason, custom_fields'); // AD-V2-9: colunas explícitas (custom_fields mantido para DealsTable/resolveBatch)
 
     // perda/resultado: buscar por status ao invés de stage_id
     if (tabKey === 'perda') {
@@ -219,29 +357,70 @@ export async function fetchStageDeals(stageIds, funnel, tabKey) {
     console.error('[gerencialService] fetchStageDeals error:', err);
     return [];
   }
+  }, 5 * 60 * 1000); // 5 min TTL — AD-V2-8
 }
 
 /**
  * Contagens agrupadas por aba lógica via STAGE_TABS.
+ * Approach híbrido: RPC para sql/reuniao/proposta/contrato/perda/resultado,
+ * MQL mantém client-side com classifyLead (AD-V2-8, Story 5.4).
  */
 export async function fetchPillCounts(funnel) {
+  return cachedQuery(`pills:${funnel || 'todos'}`, async () => {
   try {
+    const pipelineIds = getFunnelPipelineIds(funnel);
+
+    // ── Tentar RPC primeiro (Story 5.4) ──
+    try {
+      const { data: rpcData, error: rpcError } = await supabase.rpc('get_pill_counts', {
+        p_pipeline_ids: pipelineIds
+      });
+
+      if (rpcError) throw rpcError;
+
+      // Mapear resultado da RPC para objeto esperado
+      const counts = { mql: 0, sql: 0, reuniao: 0, proposta: 0, contrato: 0, perda: 0, resultado: 0 };
+      for (const row of rpcData) {
+        if (row.tab in counts) counts[row.tab] = Number(row.count);
+      }
+
+      // MQL: RPC retorna count raw. Para classificação qualificada,
+      // buscar só deals MQL e rodar classifyLead (approach híbrido).
+      const mqlDeals = await paginatedQuery(() => {
+        let q = supabase
+          .from('crm_deals')
+          .select('id, person_email, person_phone, custom_fields')
+          .eq('status', 'open')
+          .in('stage_id', STAGE_IDS.MQL)
+          .gte('deal_created_at', DATA_START_DATE);
+        return applyFunnelFilter(q, funnel);
+      });
+
+      if (mqlDeals.length) {
+        const enrichedMql = await resolveBatch(mqlDeals, supabase);
+        counts.mql = enrichedMql.filter(d =>
+          classifyLead(d.faturamento_anual, d.volume_mensal, d.segmento, d.mercado) === 'MQL'
+        ).length;
+      }
+
+      return counts;
+    } catch (rpcErr) {
+      console.warn('[gerencialService] RPC get_pill_counts failed, fallback to pagination:', rpcErr);
+    }
+
+    // ── Fallback: método antigo (paginação client-side completa) ──
     const deals = await paginatedQuery(() => {
       let q = supabase
         .from('crm_deals')
-        .select('id, stage_id, status, person_email, person_phone, custom_fields')
+        .select(`id, stage_id, status, person_email, person_phone, custom_fields, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}`)
         .eq('status', 'open')
         .gte('deal_created_at', DATA_START_DATE);
       return applyFunnelFilter(q, funnel);
     });
 
-    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
-    const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
-    const reuniaoRealizadaKey = CUSTOM_FIELDS.REUNIAO_REALIZADA.key;
     const reuniaoRealizadaSim = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
 
-    // Usar STAGE_IDS (mesma fonte do ForecastPanel) em vez de STAGE_TABS
     const stageMap = [
       { key: 'mql', ids: new Set(STAGE_IDS.MQL) },
       { key: 'sql', ids: new Set(STAGE_IDS.SQL) },
@@ -252,7 +431,6 @@ export async function fetchPillCounts(funnel) {
 
     const counts = { mql: 0, sql: 0, reuniao: 0, proposta: 0, contrato: 0, perda: 0, resultado: 0 };
 
-    // MQL: enriquecer + classifyLead (mesma regra da aba MQL e ForecastPanel)
     const mqlIds = new Set(STAGE_IDS.MQL);
     const mqlDeals = deals.filter(d => mqlIds.has(d.stage_id));
     const enrichedMql = await resolveBatch(mqlDeals, supabase);
@@ -263,16 +441,14 @@ export async function fetchPillCounts(funnel) {
     );
 
     for (const deal of deals) {
-      const cf = parseCustomFields(deal.custom_fields);
-      const isSQL = cf[sqlKey] == sqlSimVal;
+      const isSQL = deal.cf_sql_flag == sqlSimVal;
       const hasEmailPhone = !!(deal.person_email?.trim() && deal.person_phone?.trim());
-      const hasDataReuniao = !!cf[reuniaoKey];
-      const reuniaoRealizada = cf[reuniaoRealizadaKey] == reuniaoRealizadaSim;
+      const hasDataReuniao = !!deal.cf_data_reuniao;
+      const reuniaoRealizada = deal.cf_reuniao_realizada == reuniaoRealizadaSim;
 
       for (const group of stageMap) {
         if (!group.ids.has(deal.stage_id)) continue;
 
-        // Mesmos filtros do ForecastPanel
         if (group.key === 'mql' && !classifiedMqlIds.has(deal.id)) break;
         if (group.key === 'sql' && !(hasEmailPhone && isSQL)) break;
         if (group.key === 'reuniao' && !(isSQL && hasDataReuniao)) break;
@@ -283,7 +459,6 @@ export async function fetchPillCounts(funnel) {
       }
     }
 
-    // perda e resultado: contagens separadas por status (com filtro de funil)
     let lostQuery = supabase
       .from('crm_deals')
       .select('id', { count: 'exact', head: true })
@@ -307,6 +482,7 @@ export async function fetchPillCounts(funnel) {
     console.error('[gerencialService] fetchPillCounts error:', err);
     return { mql: 0, sql: 0, reuniao: 0, proposta: 0, perda: 0, resultado: 0 };
   }
+  }, 5 * 60 * 1000); // 5 min TTL — AD-V2-8
 }
 
 /**
@@ -349,20 +525,18 @@ export async function fetchHistoricalConvRate() {
   try {
     const { data: deals, error } = await supabase
       .from('crm_deals')
-      .select('id, person_email, custom_fields, status')
+      .select(`id, person_email, status, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_PROPOSTA}`)
       .gte('deal_created_at', DATA_START_DATE);
 
     if (error) throw error;
     if (!deals?.length) return { propostaCount: 0, vendasCount: 0, convRate: null };
 
     // Proposta: deals com data_proposta preenchida (base da conversão)
-    const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
     let propostaCount = 0;
     const propostaDeals = [];
     for (const deal of deals) {
-      const cf = parseCustomFields(deal.custom_fields);
-      const isSQL = cf[CUSTOM_FIELDS.SQL_FLAG.key] == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
-      const hasProposta = !!cf[propostaKey];
+      const isSQL = deal.cf_sql_flag == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+      const hasProposta = !!deal.cf_data_proposta;
       if (isSQL && hasProposta) {
         propostaCount++;
         propostaDeals.push(deal);
@@ -444,27 +618,21 @@ export async function fetchPropostaCycleData() {
   try {
     const { data: deals, error } = await supabase
       .from('crm_deals')
-      .select('id, status, person_email, custom_fields, close_time, lost_time')
+      .select(`id, status, person_email, close_time, lost_time, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_PROPOSTA}`)
       .gte('deal_created_at', DATA_START_DATE);
     if (error) throw error;
     if (!deals?.length) return [];
 
     // Filtrar: SQL_FLAG=SIM e data_proposta preenchida
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
-    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
-    const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
 
     const qualified = deals.filter(d => {
-      const cf = parseCustomFields(d.custom_fields);
-      return cf[sqlKey] == sqlSimVal && cf[propostaKey];
-    }).map(d => {
-      const cf = parseCustomFields(d.custom_fields);
-      return {
-        ...d,
-        data_proposta: cf[propostaKey],
-        person_email: d.person_email?.trim()?.toLowerCase() || null,
-      };
-    });
+      return d.cf_sql_flag == sqlSimVal && d.cf_data_proposta;
+    }).map(d => ({
+      ...d,
+      data_proposta: d.cf_data_proposta,
+      person_email: d.person_email?.trim()?.toLowerCase() || null,
+    }));
 
     if (!qualified.length) return [];
 
@@ -583,14 +751,12 @@ export async function fetchSqlContext() {
       classifyLead(l.lead_revenue_range, l.lead_monthly_volume, l.lead_segment, l.lead_market) === 'MQL'
     ).length;
 
-    // Total SQLs a partir de 2026 (deals com SQL_FLAG=SIM) — paginado
-    const { data: deals } = await fetchAll('crm_deals', 'custom_fields, deal_created_at');
+    // Total SQLs a partir de 2026 (deals com SQL_FLAG=SIM) — paginado // AD-V2-9: JSONB extraction
+    const { data: deals } = await fetchAll('crm_deals', `deal_created_at, ${JSONB_FIELDS.SQL_FLAG}`);
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
-    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
     const totalSql = (deals || []).filter(d => {
       if (d.deal_created_at < DATA_START_DATE) return false;
-      const cf = parseCustomFields(d.custom_fields);
-      return cf[sqlKey] == sqlSimVal;
+      return d.cf_sql_flag == sqlSimVal;
     }).length;
 
     return { totalMql, totalSql };
@@ -611,34 +777,26 @@ export async function fetchForecastData(funnel, startMonth, endMonth) {
     const dateTo = endMonth ? getNextMonth(endMonth) : null;
     const allDeals = await paginatedQuery(() => {
       let q = supabase.from('crm_deals')
-        .select('id, stage_id, status, deal_created_at, close_time, won_time, lost_time, value, pipeline_id, custom_fields, person_email, person_phone')
+        .select(`id, stage_id, status, deal_created_at, close_time, won_time, lost_time, value, pipeline_id, person_email, person_phone, custom_fields, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_QUALIFICACAO}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}, ${JSONB_FIELDS.DATA_PROPOSTA}`)
         .gte('deal_created_at', dateFrom);
       if (dateTo) q = q.lt('deal_created_at', dateTo);
       return applyFunnelFilter(q, funnel);
     });
     if (!allDeals?.length) return null;
 
-    // Parse custom fields
-    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
+    // AD-V2-9: JSONB extraction — campos custom já top-level via aliases cf_*
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
-    const qualKey = CUSTOM_FIELDS.DATA_QUALIFICACAO.key;
-    const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
-    const reuniaoRealizadaKey = CUSTOM_FIELDS.REUNIAO_REALIZADA.key;
     const reuniaoRealizadaSim = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
-    const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
 
-    const deals = allDeals.map(d => {
-      const cf = parseCustomFields(d.custom_fields);
-      return {
-        ...d,
-        _isSQL: cf[sqlKey] == sqlSimVal,
-        _hasEmailAndPhone: !!(d.person_email?.trim() && d.person_phone?.trim()),
-        _dataQualificacao: cf[qualKey] || null,
-        _dataReuniao: cf[reuniaoKey] || null,
-        _reuniaoRealizada: cf[reuniaoRealizadaKey] == reuniaoRealizadaSim,
-        _dataProposta: cf[propostaKey] || null,
-      };
-    });
+    const deals = allDeals.map(d => ({
+      ...d,
+      _isSQL: d.cf_sql_flag == sqlSimVal,
+      _hasEmailAndPhone: !!(d.person_email?.trim() && d.person_phone?.trim()),
+      _dataQualificacao: d.cf_data_qualificacao || null,
+      _dataReuniao: d.cf_data_reuniao || null,
+      _reuniaoRealizada: d.cf_reuniao_realizada == reuniaoRealizadaSim,
+      _dataProposta: d.cf_data_proposta || null,
+    }));
 
     // 2. Transitions + Sales em paralelo (ambas dependem apenas de dealIds/emails)
     const dealIds = deals.map(d => d.id);
@@ -646,20 +804,22 @@ export async function fetchForecastData(funnel, startMonth, endMonth) {
     const dealEmails = [...new Set(deals.map(d => d.person_email?.trim()?.toLowerCase()).filter(Boolean))];
 
     const [allTransitions, salesData] = await Promise.all([
-      paginatedQuery(() =>
-        supabase
+      chunkedPaginatedQuery(
+        (chunk) => supabase
           .from('crm_stage_transitions')
           .select('deal_id, to_stage_id, transitioned_at, time_in_previous_stage_sec')
-          .in('deal_id', dealIds)
+          .in('deal_id', chunk),
+        dealIds
       ),
       dealEmails.length
-        ? paginatedQuery(() =>
-            supabase
+        ? chunkedPaginatedQuery(
+            (chunk) => supabase
               .from('sales')
               .select('email_pipedrive, email_stripe, data_fechamento')
-              .in('email_pipedrive', dealEmails)
+              .in('email_pipedrive', chunk)
               .gte('data_fechamento', DATA_START_DATE)
-              .order('data_fechamento', { ascending: false })
+              .order('data_fechamento', { ascending: false }),
+            dealEmails
           )
         : Promise.resolve([]),
     ]);
@@ -879,14 +1039,14 @@ export async function fetchForecastStageDeals(funnel, startMonth, endMonth) {
   try {
     const dateFrom = startMonth ? `${startMonth}-01` : DATA_START_DATE;
     const dateTo = endMonth ? getNextMonth(endMonth) : null;
-    let query = supabase.from('crm_deals')
-      .select('title, person_name, person_email, person_phone, value, stage_id, stage_name, status, pipeline_id, deal_created_at, close_time, lost_time, custom_fields')
-      .eq('status', 'open')
-      .gte('deal_created_at', dateFrom);
-    if (dateTo) query = query.lt('deal_created_at', dateTo);
-    query = applyFunnelFilter(query, funnel);
-    const { data: deals, error } = await query;
-    if (error) throw error;
+    const deals = await paginatedQuery(() => {
+      let q = supabase.from('crm_deals')
+        .select(`title, person_name, person_email, person_phone, value, stage_id, stage_name, status, pipeline_id, deal_created_at, close_time, lost_time, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}, ${JSONB_FIELDS.DATA_PROPOSTA}`)
+        .eq('status', 'open')
+        .gte('deal_created_at', dateFrom);
+      if (dateTo) q = q.lt('deal_created_at', dateTo);
+      return applyFunnelFilter(q, funnel);
+    });
     if (!deals?.length) return {};
 
     // Inverter PIPELINE_FUNNELS para pipeline_id → label
@@ -904,15 +1064,11 @@ export async function fetchForecastStageDeals(funnel, startMonth, endMonth) {
       { key: 'contrato', label: 'Contrato Enviado', ids: new Set(STAGE_IDS.CONTRATO_ENVIADO) },
     ];
 
-    const sqlKey = CUSTOM_FIELDS.SQL_FLAG.key;
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
     const sqlNaoVal = CUSTOM_FIELDS.SQL_FLAG.values.NAO;
     const sqlRevisarVal = CUSTOM_FIELDS.SQL_FLAG.values.A_REVISAR;
-    const reuniaoKey = CUSTOM_FIELDS.DATA_REUNIAO.key;
-    const reuniaoRealizadaKey = CUSTOM_FIELDS.REUNIAO_REALIZADA.key;
     const reuniaoRealizadaSim = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
     const reuniaoRealizadaNao = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.NAO;
-    const propostaKey = CUSTOM_FIELDS.DATA_PROPOSTA.key;
 
     // Mapeamento correto dos valores do campo SQL?
     function mapSqlFlag(val) {
@@ -928,15 +1084,9 @@ export async function fetchForecastStageDeals(funnel, startMonth, endMonth) {
       return '—';
     }
 
-    // Enrich deals com custom fields parseados
-    const enriched = deals.map(d => {
-      const cf = parseCustomFields(d.custom_fields);
-      return { ...d, _cf: cf };
-    });
-
     const result = {};
     for (const group of stageMap) {
-      let filtered = enriched.filter(d => group.ids.has(d.stage_id));
+      let filtered = deals.filter(d => group.ids.has(d.stage_id));
 
       // Filtros por etapa:
       if (group.key === 'sql') {
@@ -944,19 +1094,19 @@ export async function fetchForecastStageDeals(funnel, startMonth, endMonth) {
         filtered = filtered.filter(d =>
           d.person_email && d.person_email.trim() &&
           d.person_phone && d.person_phone.trim() &&
-          d._cf[sqlKey] == sqlSimVal
+          d.cf_sql_flag == sqlSimVal
         );
       } else if (group.key === 'reuniao') {
         // Reunião: apenas SQL? = Sim E data_reuniao preenchida
         filtered = filtered.filter(d =>
-          d._cf[sqlKey] == sqlSimVal &&
-          d._cf[reuniaoKey]
+          d.cf_sql_flag == sqlSimVal &&
+          d.cf_data_reuniao
         );
       } else if (group.key === 'proposta') {
         // Proposta: apenas SQL? = Sim E Reunião Realizada = Sim
         filtered = filtered.filter(d =>
-          d._cf[sqlKey] == sqlSimVal &&
-          d._cf[reuniaoRealizadaKey] == reuniaoRealizadaSim
+          d.cf_sql_flag == sqlSimVal &&
+          d.cf_reuniao_realizada == reuniaoRealizadaSim
         );
       }
 
@@ -969,10 +1119,10 @@ export async function fetchForecastStageDeals(funnel, startMonth, endMonth) {
         status: d.status ?? '—',
         value: d.value ?? 0,
         deal_created_at: d.deal_created_at ?? '—',
-        is_sql: mapSqlFlag(d._cf[sqlKey]),
-        data_reuniao: d._cf[reuniaoKey] ? String(d._cf[reuniaoKey]).slice(0, 10) : '—',
-        reuniao_realizada: mapReuniaoRealizada(d._cf[reuniaoRealizadaKey]),
-        data_proposta: d._cf[propostaKey] ? String(d._cf[propostaKey]).slice(0, 10) : '—',
+        is_sql: mapSqlFlag(d.cf_sql_flag),
+        data_reuniao: d.cf_data_reuniao ? String(d.cf_data_reuniao).slice(0, 10) : '—',
+        reuniao_realizada: mapReuniaoRealizada(d.cf_reuniao_realizada),
+        data_proposta: d.cf_data_proposta ? String(d.cf_data_proposta).slice(0, 10) : '—',
         data_fechamento: d.close_time ? String(d.close_time).slice(0, 10) : '—',
         lost_time: d.lost_time ? String(d.lost_time).slice(0, 10) : '—',
       }));

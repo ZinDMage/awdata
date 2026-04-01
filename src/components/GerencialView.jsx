@@ -272,7 +272,7 @@ export default function GerencialView() {
       if (!cancelled) { setForecastData(null); setForecastLoading(false); }
     });
     return () => { cancelled = true; };
-  }, [selectedFunnel, forecastPeriod]);
+  }, [selectedFunnel, forecastPeriod.startMonth, forecastPeriod.endMonth]);
 
   // P3: Ref para fade transition entre sub-abas
   const [fadeIn, setFadeIn] = useState(true);

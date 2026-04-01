@@ -18,10 +18,12 @@ import { createClient } from '@supabase/supabase-js';
  *   WEBHOOK_SECRET        — Secret para autenticar requests
  */
 
-const supabase = createClient(
-  process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY || process.env.VITE_SUPABASE_ANON_KEY
-);
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+if (!SUPABASE_SERVICE_KEY) {
+  console.error('[webhook/yayforms] SUPABASE_SERVICE_KEY is required — anon key cannot bypass RLS.');
+}
+const supabase = SUPABASE_SERVICE_KEY ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY) : null;
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 
@@ -52,7 +54,7 @@ function mapPayload(raw) {
       lead_segment: raw.lead_segment || null,
       lead_market: raw.lead_market || null,
       lead_phone: raw.lead_phone || null,
-      time_to_complete_sec: raw.time_to_complete_sec || null,
+      time_to_complete_sec: raw.time_to_complete_sec ?? null,
       raw_payload: raw,
       ingested_at: new Date().toISOString(),
     };
@@ -132,7 +134,7 @@ async function isDuplicate(email, submittedAt) {
   const fiveMinBefore = new Date(ts.getTime() - 5 * 60 * 1000).toISOString();
   const fiveMinAfter = new Date(ts.getTime() + 5 * 60 * 1000).toISOString();
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('yayforms_responses')
     .select('lead_email')
     .eq('lead_email', email)
@@ -140,31 +142,46 @@ async function isDuplicate(email, submittedAt) {
     .lte('submitted_at', fiveMinAfter)
     .limit(1);
 
+  if (error) {
+    console.error('[isDuplicate] Supabase error — accepting record to prevent data loss:', error);
+    return false;
+  }
   return data && data.length > 0;
 }
 
 // ─── Handler ───────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // CORS — webhook é server-to-server, restringir origin
+  const allowedOrigin = process.env.WEBHOOK_CORS_ORIGIN || '';
+  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  // Auth check (skip se WEBHOOK_SECRET não configurado — dev mode)
+  // Fail fast se Supabase não configurado
+  if (!supabase) {
+    return res.status(500).json({ error: 'Server misconfiguration: missing SUPABASE_SERVICE_KEY' });
+  }
+
+  // Auth check — obrigatório em produção
+  if (!WEBHOOK_SECRET && process.env.VERCEL_ENV === 'production') {
+    console.error('[webhook/yayforms] WEBHOOK_SECRET not set in production — rejecting request');
+    return res.status(500).json({ error: 'Server misconfiguration' });
+  }
   if (WEBHOOK_SECRET) {
     const auth = req.headers['authorization'] || '';
-    const token = auth.replace('Bearer ', '');
-    if (token !== WEBHOOK_SECRET) {
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    if (!token || token !== WEBHOOK_SECRET) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
 
   try {
     const body = req.body;
+    if (!body) return res.status(400).json({ error: 'Empty request body' });
     const items = Array.isArray(body) ? body : [body];
 
     const results = { inserted: 0, skipped_dup: 0, skipped_invalid: 0, errors: [] };
@@ -209,6 +226,6 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error('Webhook error:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 }

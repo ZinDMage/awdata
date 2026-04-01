@@ -46,7 +46,10 @@ try {
 }
 
 // ─── Config ────────────────────────────────────────────────────────────────
-const CSV_PATH = '/Users/lucaskurt/Downloads/responses-awsales qualificação-20260330 (1).csv';
+const CSV_PATH = process.argv.find((_, i, a) => a[i - 1] === '--csv') || process.argv[2] || '/Users/lucaskurt/Downloads/responses-awsales qualificação-20260330 (1).csv';
+if (CSV_PATH.startsWith('/Users/') && !process.argv.includes('--csv') && !process.argv[2]) {
+  console.warn('⚠️  Usando CSV path hardcoded. Passe o caminho como argumento: node scripts/backfill-yayforms.mjs <path>');
+}
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.VITE_SUPABASE_ANON_KEY;

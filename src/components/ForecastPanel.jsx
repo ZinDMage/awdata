@@ -32,6 +32,15 @@ const STAGE_ICONS = {
   contrato: '📄',
 };
 
+/** Escapa campo CSV: se contém ;, " ou \n, envolve em aspas */
+function csvField(v) {
+  const s = v == null ? '' : String(v);
+  if (s.includes(';') || s.includes('"') || s.includes('\n')) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
 /** Gera e baixa um CSV a partir de array de objetos */
 function downloadCSV(rows, filename) {
   if (!rows.length) return;
@@ -39,20 +48,20 @@ function downloadCSV(rows, filename) {
   const csvRows = [
     headers.join(';'),
     ...rows.map(r => [
-      r.person_email,
-      r.person_phone,
-      r.etapa,
-      `"${(r.funil || '').replace(/"/g, '""')}"`,
-      `"${(r.stage_name || '').replace(/"/g, '""')}"`,
-      r.status,
-      r.value,
-      r.deal_created_at ? String(r.deal_created_at).slice(0, 10) : '—',
-      r.is_sql,
+      csvField(r.person_email),
+      csvField(r.person_phone),
+      csvField(r.etapa),
+      csvField(r.funil),
+      csvField(r.stage_name),
+      csvField(r.status),
+      csvField(r.value),
+      csvField(r.deal_created_at ? String(r.deal_created_at).slice(0, 10) : '—'),
+      csvField(r.is_sql),
       r.data_reuniao ? String(r.data_reuniao).slice(0, 10) : '—',
-      r.reuniao_realizada,
+      csvField(r.reuniao_realizada),
       r.data_proposta ? String(r.data_proposta).slice(0, 10) : '—',
-      r.data_fechamento,
-      r.lost_time,
+      csvField(r.data_fechamento),
+      csvField(r.lost_time),
     ].join(';')),
   ];
   const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
@@ -192,6 +201,7 @@ export default function ForecastPanel({ data, loading, selectedFunnel, period, o
       </div>
 
       {/* Funnel Flow — conversão e ciclo entre etapas */}
+      {transitions.length > 0 && (
       <div className="flex items-stretch justify-center gap-0 mb-8 overflow-x-auto pb-2">
         {transitions.map((t, i) => {
           const isBottleneck = i === bottleneckIdx;
@@ -239,6 +249,7 @@ export default function ForecastPanel({ data, loading, selectedFunnel, period, o
           </span>
         </div>
       </div>
+      )}
 
       {/* Bottleneck callout */}
       {bottleneckIdx >= 0 && transitions[bottleneckIdx].convRate != null && (

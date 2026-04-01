@@ -270,7 +270,7 @@ export default function MetricsTable({ data, aggData, colKeys, colLabels, mode, 
 
                         // Story 5-3 D3: numeric delta variation in days for dt section
                         const deltaVarDays = sec.id === "dt" && val != null && prev != null
-                          ? +(val - prev).toFixed(2)
+                          ? val - prev
                           : null;
 
                         return (

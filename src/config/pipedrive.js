@@ -16,6 +16,7 @@ export const STAGE_IDS = {
 // Derivado automaticamente para evitar divergência manual
 STAGE_IDS.PIPELINE_TOTAL = [
   ...STAGE_IDS.REUNIAO_AGENDADA,
+  ...STAGE_IDS.REAGENDAMENTO_PENDENTE,
   ...STAGE_IDS.PROPOSTA,
   ...STAGE_IDS.CONTRATO_ENVIADO,
 ];
@@ -95,8 +96,8 @@ export const parseCustomFields = (cf) => {
 export const STAGE_TABS = {
   mql:       { stageIds: [1, 49],                              label: 'MQL',       icon: '📨' },
   sql:       { stageIds: [19, 50, 53, 35],                     label: 'SQL',       icon: '✅' },
-  reuniao:   { stageIds: [3, 11, 45, 51, 37, 55, 58],              label: 'Reunião',   icon: '📅' },
-  proposta:  { stageIds: [4, 46, 39, 59, 41, 47, 40, 60],      label: 'Proposta',  icon: '📝' },
+  reuniao:   { stageIds: [3, 11, 45, 51, 37, 55, 58, 64, 65],       label: 'Reunião',   icon: '📅' },
+  proposta:  { stageIds: [4, 46, 39, 59, 66, 41, 47, 40, 60, 67], label: 'Proposta',  icon: '📝' },
   perda:     { stageIds: [],                                    label: 'Perda',     icon: '❌' },
   resultado: { stageIds: [],                                    label: 'Resultado', icon: '🏆' },
 };
