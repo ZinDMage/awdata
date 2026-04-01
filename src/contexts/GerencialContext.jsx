@@ -19,7 +19,7 @@ export function GerencialProvider({ children }) {
   const [selectedFunnel, setSelectedFunnel] = useState('todos');
   const [bowtiePeriod, setBowtiePeriod] = useState(() => {
     const current = getCurrentMonth();
-    return { startMonth: current, endMonth: current };
+    return { startMonth: '2026-01', endMonth: current };
   });
 
   // ── Hooks (stale-while-revalidate) ──
