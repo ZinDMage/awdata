@@ -7,13 +7,16 @@ import { fetchAdSpend, fetchPropostaCycleData, fetchHistoricalConvRate, fetchMql
 import { classifyLead } from '@/services/classificationService';
 import BowtieChart from './BowtieChart';
 import ForecastPanel from './ForecastPanel';
-import StageTabBar from './StageTabBar';
+import NavHeader from './ui/nav-header';
+import PillTabs from './ui/pill-tabs';
 import StageView from './StageView';
 import LossMatrix from './LossMatrix';
 import ObjectionMatrix from './ObjectionMatrix';
 import CycleBySegmentChart from './CycleBySegmentChart';
 import EmptyState from './EmptyState';
 import SkeletonLoader from './SkeletonLoader';
+import DealDetailModal from './DealDetailModal';
+import useDealModal from '@/hooks/useDealModal';
 
 // Mapeamento de activeTab (STAGE_TABS key) → TAB_CONFIG key (gerencialTabs)
 const TAB_TO_CONFIG = {
@@ -60,22 +63,13 @@ const MONTH_OPTIONS = generateMonthOptions();
 // ── P7: Componente reutilizável de pills de funil ──
 function FunnelPicker({ selectedFunnel, onFunnelChange }) {
   return (
-    <div className="flex items-center gap-1">
-      {FUNNEL_OPTIONS.map(opt => {
-        const isActive = selectedFunnel === opt.key;
-        const cls = isActive
-          ? 'bg-info text-white rounded-full px-3 py-1 text-sm font-medium cursor-pointer'
-          : 'bg-surface-secondary text-content-secondary rounded-full px-3 py-1 text-sm hover:bg-surface-tertiary cursor-pointer';
-        return (
-          <button
-            key={opt.key}
-            onClick={() => onFunnelChange(opt.key)}
-            className={cls}
-          >
-            {opt.label}
-          </button>
-        );
-      })}
+    <div className="flex items-center">
+      <PillTabs 
+        options={FUNNEL_OPTIONS} 
+        activeKey={selectedFunnel} 
+        onKeyChange={onFunnelChange} 
+        size="sm"
+      />
     </div>
   );
 }
@@ -97,14 +91,14 @@ function BowtieFilters({ bowtiePeriod, selectedFunnel, onPeriodChange, onFunnelC
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-4 mb-4">
+    <div className="flex flex-col md:flex-row items-center justify-between gap-4 mb-8">
       {/* Seletores de período */}
       <div className="flex items-center gap-2">
         <label className="text-xs text-content-tertiary">Início:</label>
         <select
           value={bowtiePeriod.startMonth}
           onChange={(e) => handlePeriodChange({ ...bowtiePeriod, startMonth: e.target.value })}
-          className="bg-surface-tertiary rounded-lg px-3 py-1.5 text-sm text-content-primary border border-border-subtle/20 outline-none focus:ring-2 focus:ring-info"
+          className="bg-surface-tertiary rounded-lg px-3 py-1.5 text-sm text-content-primary border border-border-subtle/20 outline-none focus:ring-2 focus:ring-info transition-all"
         >
           {MONTH_OPTIONS.map(opt => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -115,7 +109,7 @@ function BowtieFilters({ bowtiePeriod, selectedFunnel, onPeriodChange, onFunnelC
         <select
           value={bowtiePeriod.endMonth}
           onChange={(e) => handlePeriodChange({ ...bowtiePeriod, endMonth: e.target.value })}
-          className="bg-surface-tertiary rounded-lg px-3 py-1.5 text-sm text-content-primary border border-border-subtle/20 outline-none focus:ring-2 focus:ring-info"
+          className="bg-surface-tertiary rounded-lg px-3 py-1.5 text-sm text-content-primary border border-border-subtle/20 outline-none focus:ring-2 focus:ring-info transition-all"
         >
           {MONTH_OPTIONS.map(opt => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -124,13 +118,18 @@ function BowtieFilters({ bowtiePeriod, selectedFunnel, onPeriodChange, onFunnelC
       </div>
 
       {/* Filtro de funil (pills) — P7: reutiliza FunnelPicker */}
-      <FunnelPicker selectedFunnel={selectedFunnel} onFunnelChange={onFunnelChange} />
+      <div className="flex justify-center">
+        <FunnelPicker selectedFunnel={selectedFunnel} onFunnelChange={onFunnelChange} />
+      </div>
+      
+      {/* Espaçador para equilibrar no desktop (opcional, mas ajuda no justify-between) */}
+      <div className="hidden md:block w-[200px]" />
     </div>
   );
 }
 
 // ── StageView com dados computados ──
-function StageViewWithData({ activeTab, deals, bowtieStages }) {
+function StageViewWithData({ activeTab, deals, bowtieStages, onRowClick }) {
   const configKey = TAB_TO_CONFIG[activeTab] || activeTab;
   const columns = getTabColumns(configKey);
 
@@ -242,6 +241,7 @@ function StageViewWithData({ activeTab, deals, bowtieStages }) {
       columns={columns}
       deals={filteredDeals}
       sections={sections}
+      onRowClick={onRowClick}
       afterCharts={
         activeTab === 'perda' ? <LossMatrix deals={filteredDeals} /> :
         activeTab === 'proposta' ? <ObjectionMatrix deals={filteredDeals} /> :
@@ -265,6 +265,14 @@ export default function GerencialView() {
     bowtieData,
     tabData,
   } = useGerencial();
+
+  const {
+    selectedDealId,
+    data: dealData,
+    loading: dealLoading,
+    openModal,
+    closeModal
+  } = useDealModal();
 
   // Forecast: previsibilidade de receita (carrega no bowtie)
   const [forecastData, setForecastData] = useState(null);
@@ -336,7 +344,7 @@ export default function GerencialView() {
   return (
     <div>
       {/* Pill Navigation Bar */}
-      <StageTabBar tabs={tabs} activeTab={activeTab} onTabChange={handleTabChange} />
+      <NavHeader tabs={tabs} activeTab={activeTab} onTabChange={handleTabChange} />
 
       {/* P3: Fade transition wrapper */}
       <div
@@ -379,7 +387,7 @@ export default function GerencialView() {
         ) : (
           <>
             {/* Filtro de funil nas sub-abas — P7: reutiliza FunnelPicker */}
-            <div className="mb-4">
+            <div className="mb-6 flex justify-center">
               <FunnelPicker selectedFunnel={selectedFunnel} onFunnelChange={setSelectedFunnel} />
             </div>
 
@@ -391,11 +399,24 @@ export default function GerencialView() {
                 activeTab={activeTab}
                 deals={tabData.data || []}
                 bowtieStages={bowtieData.data?.stages}
+                onRowClick={openModal}
               />
             )}
           </>
         )}
       </div>
+
+      {/* Deal Detail Modal */}
+      {selectedDealId && (
+        <DealDetailModal
+          dealId={selectedDealId}
+          transitions={dealData?.transitions}
+          calls={dealData?.calls}
+          tasks={dealData?.tasks}
+          loading={dealLoading}
+          onClose={closeModal}
+        />
+      )}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import StageKpiCards from './StageKpiCards';
 import DonutChart from './DonutChart';
 import BarChart from './BarChart';
-import DealsTable from './DealsTable';
+import InteractiveDealsTable from './ui/interactive-deals-table';
 
 export default function StageView({ kpis, charts, columns, deals, sections, onRowClick, afterCharts }) {
   return (
@@ -29,7 +29,7 @@ export default function StageView({ kpis, charts, columns, deals, sections, onRo
         sections.map((section, i) => (
           <div key={section.title}>
             {i > 0 && <hr className="border-t-2 border-border-subtle/30 my-8" />}
-            <DealsTable
+            <InteractiveDealsTable
               columns={section.columns || columns}
               rows={section.deals || []}
               title={section.title}
@@ -39,7 +39,7 @@ export default function StageView({ kpis, charts, columns, deals, sections, onRo
           </div>
         ))
       ) : (
-        <DealsTable
+        <InteractiveDealsTable
           columns={columns}
           rows={deals || []}
           title={`${deals?.length || 0} deals`}
