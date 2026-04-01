@@ -15,10 +15,7 @@ export const STAGE_IDS = {
 };
 // Derivado automaticamente para evitar divergência manual
 STAGE_IDS.PIPELINE_TOTAL = [
-  ...STAGE_IDS.REUNIAO_AGENDADA,
-  ...STAGE_IDS.REAGENDAMENTO_PENDENTE,
   ...STAGE_IDS.PROPOSTA,
-  ...STAGE_IDS.CONTRATO_ENVIADO,
 ];
 
 // ── Custom Fields do Pipedrive ─────────────────────────────────
