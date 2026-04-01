@@ -325,8 +325,8 @@ export const fetchMonthlyMetrics = () => {
           const fk = getFunnelKey(d.pipeline_id);
           const mf = fk ? initMonthInMap(metricsByMonthByFunnel[fk], baseMk) : null;
 
-          // Pipeline Total: always by deal_created_at
-          if (STAGE_IDS.PIPELINE_TOTAL.includes(d.stage_id)) {
+          // Pipeline Total: only open deals currently in negotiation stages
+          if (d.status === 'open' && STAGE_IDS.PIPELINE_TOTAL.includes(d.stage_id)) {
             updateMetrics(m, d, d.value, 'g', 'pipe', baseWk);
             if (mf) updateMetrics(mf, d, d.value, 'g', 'pipe', baseWk);
           }
