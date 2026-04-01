@@ -11,6 +11,7 @@ import StageTabBar from './StageTabBar';
 import StageView from './StageView';
 import LossMatrix from './LossMatrix';
 import ObjectionMatrix from './ObjectionMatrix';
+import CycleBySegmentChart from './CycleBySegmentChart';
 import EmptyState from './EmptyState';
 import SkeletonLoader from './SkeletonLoader';
 
@@ -244,6 +245,7 @@ function StageViewWithData({ activeTab, deals, bowtieStages }) {
       afterCharts={
         activeTab === 'perda' ? <LossMatrix deals={filteredDeals} /> :
         activeTab === 'proposta' ? <ObjectionMatrix deals={filteredDeals} /> :
+        activeTab === 'resultado' ? <CycleBySegmentChart deals={filteredDeals} /> :
         undefined
       }
     />
