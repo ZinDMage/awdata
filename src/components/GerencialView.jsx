@@ -239,7 +239,7 @@ function StageViewWithData({ activeTab, deals, bowtieStages }) {
       columns={columns}
       deals={filteredDeals}
       sections={sections}
-      afterCharts={activeTab === 'perda' ? <LossMatrix deals={filteredDeals} bowtieStages={bowtieStages} /> : undefined}
+      afterCharts={activeTab === 'perda' ? <LossMatrix deals={filteredDeals} /> : undefined}
     />
   );
 }
