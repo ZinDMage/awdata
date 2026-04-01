@@ -56,7 +56,7 @@ function parseObjections(raw) {
 export default function ObjectionMatrix({ deals }) {
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const [startMonth, setStartMonth] = useState(currentMonth);
+  const [startMonth, setStartMonth] = useState('2026-01');
   const [endMonth, setEndMonth] = useState(currentMonth);
 
   const handleStartChange = (v) => {
