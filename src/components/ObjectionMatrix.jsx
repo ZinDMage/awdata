@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { STAGE_IDS } from '@/config/pipedrive';
+import { STAGE_IDS, CUSTOM_FIELDS } from '@/config/pipedrive';
 
 /**
  * Stage columns for the objection matrix — Proposta sub-stages only.
@@ -42,9 +42,11 @@ function isInPeriod(deal, startMonth, endMonth) {
  * Parse objections from a deal's cf_objecoes field.
  * Handles comma-separated, semicolon-separated, and single values.
  */
+const OBJECTION_LABELS = CUSTOM_FIELDS.OBJECOES_POS_CONTATO.labels || {};
+
 function parseObjections(raw) {
   if (!raw || typeof raw !== 'string') return [];
-  return raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+  return raw.split(/[,;]/).map(s => s.trim()).filter(Boolean).map(id => OBJECTION_LABELS[id] || id);
 }
 
 /**

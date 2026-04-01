@@ -45,7 +45,24 @@ export const CUSTOM_FIELDS = {
     key: 'fd1fa603cc3094f12eba1ecc42161fbb94800771'
   },
   OBJECOES_POS_CONTATO: {    // FR74
-    key: 'e9d84f444976c291b76f78c941a266f8d760bd0c'
+    key: 'e9d84f444976c291b76f78c941a266f8d760bd0c',
+    labels: {
+      '49': 'Sem Orçamento',
+      '50': 'Não é o Tomador de Decisão Final',
+      '51': 'Já Usa uma Solução Similar',
+      '52': 'Experiência Ruim no Passado',
+      '53': 'Aguardando Prioridade de Projeto',
+      '54': 'Vai Manter o Fornecedor Atual',
+      '55': 'Não é o Momento Ideal',
+      '56': 'Concorrente com Melhor Custo-Benefício',
+      '57': 'Falta de integrações com sistemas do cliente',
+      '58': 'Cliente não Toma Decisão na Reunião',
+      '71': 'Cliente está realizando pesquisa de Mercado',
+      '81': 'Avaliação técnica com o time interno',
+      '82': 'Avaliação com o Conselho para verificar prioridade',
+      '87': 'Não é o ICP',
+      '102': 'Não teve Percepção de valor / preço com a Entrega',
+    }
   },
 };
 
