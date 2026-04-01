@@ -10,6 +10,7 @@ import ForecastPanel from './ForecastPanel';
 import StageTabBar from './StageTabBar';
 import StageView from './StageView';
 import LossMatrix from './LossMatrix';
+import ObjectionMatrix from './ObjectionMatrix';
 import EmptyState from './EmptyState';
 import SkeletonLoader from './SkeletonLoader';
 
@@ -146,6 +147,7 @@ function StageViewWithData({ activeTab, deals, bowtieStages }) {
       sql_flag_label: SQL_FLAG_LABELS[sqlFlagVal] ?? '—',
       reuniao_realizada_label: cf[CUSTOM_FIELDS.REUNIAO_REALIZADA.key] == CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM ? 'Sim' : 'Não',
       tem_reuniao: (d.data_reuniao ?? cf[CUSTOM_FIELDS.DATA_REUNIAO.key]) ? 'Sim' : 'Não',
+      cf_objecoes: cf[CUSTOM_FIELDS.OBJECOES_POS_CONTATO.key] ?? null,
     };
   }), [deals]);
 
@@ -239,7 +241,11 @@ function StageViewWithData({ activeTab, deals, bowtieStages }) {
       columns={columns}
       deals={filteredDeals}
       sections={sections}
-      afterCharts={activeTab === 'perda' ? <LossMatrix deals={filteredDeals} /> : undefined}
+      afterCharts={
+        activeTab === 'perda' ? <LossMatrix deals={filteredDeals} /> :
+        activeTab === 'proposta' ? <ObjectionMatrix deals={filteredDeals} /> :
+        undefined
+      }
     />
   );
 }
