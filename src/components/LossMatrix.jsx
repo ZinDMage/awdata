@@ -55,7 +55,32 @@ function isInPeriod(deal, startMonth, endMonth) {
  * Rows: loss reasons, Columns: pipeline stages, Cells: deal count
  * Includes period filter, Total column, % column, and Total row.
  */
-export default function LossMatrix({ deals }) {
+/**
+ * Map bowtie stage labels → LossMatrix STAGE_COLUMNS keys.
+ * Some bowtie stages map to the same matrix column (e.g. Lead+MQL → mql).
+ * For stages sharing a bowtie source, we use the same total (e.g. reuniao + reagendamento).
+ */
+const BOWTIE_TO_MATRIX = {
+  mql:           ['Lead', 'MQL'],       // bowtie Lead + MQL → matrix mql
+  sql:           ['SQL'],
+  reuniao:       ['R. Agendada'],
+  reagendamento: ['R. Agendada'],       // shares reunião total
+  contrato:      ['Contrato Enviado'],
+  // proposta: sem equivalente no bowtie (Pagamentos Realizados = vendas, não propostas) → mostra "—"
+};
+
+function getBowtieCountForKey(bowtieStages, matrixKey) {
+  const labels = BOWTIE_TO_MATRIX[matrixKey];
+  if (!labels || !bowtieStages?.length) return null;
+  let total = 0;
+  for (const label of labels) {
+    const stage = bowtieStages.find(s => s.name === label);
+    if (stage) total += stage.count;
+  }
+  return total;
+}
+
+export default function LossMatrix({ deals, bowtieStages }) {
   // Default period: current month
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -231,6 +256,36 @@ export default function LossMatrix({ deals }) {
                 <td className="text-center px-3 py-2.5 font-bold text-content-primary tabular-nums">
                 </td>
               </tr>
+              {bowtieStages?.length > 0 && (
+                <tr className="bg-[#b8860b]/10 border-t border-border-subtle/20">
+                  <td className="px-4 py-2.5 text-right sticky left-0 bg-surface-secondary z-10 border-r border-border-subtle/10">
+                    <span className="text-xs font-bold text-[#d4a634]">% Perda</span>
+                    <span className="block text-[10px] text-content-tertiary/60 mt-0.5">base: período bowtie</span>
+                  </td>
+                  {STAGE_COLUMNS.map(col => {
+                    const bowtieTotal = getBowtieCountForKey(bowtieStages, col.key);
+                    const lost = stageTotals[col.key];
+                    if (!bowtieTotal || bowtieTotal === 0) {
+                      return (
+                        <td key={col.key} className="text-center px-3 py-2.5 text-content-tertiary tabular-nums font-medium">
+                          —
+                        </td>
+                      );
+                    }
+                    const pct = ((lost / bowtieTotal) * 100).toFixed(1);
+                    const isHigh = parseFloat(pct) >= 20;
+                    return (
+                      <td key={col.key} className={`text-center px-3 py-2.5 tabular-nums font-bold ${isHigh ? 'text-negative' : 'text-[#d4a634]'}`}>
+                        {pct}%
+                      </td>
+                    );
+                  })}
+                  <td className="text-center px-3 py-2.5 text-content-tertiary tabular-nums">
+                  </td>
+                  <td className="text-center px-3 py-2.5 text-content-tertiary tabular-nums">
+                  </td>
+                </tr>
+              )}
             </tfoot>
           </table>
         </div>
