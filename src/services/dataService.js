@@ -11,6 +11,7 @@ import { JSONB_FIELDS } from '@/config/queryColumns'; // AD-V2-9
 import { fetchAll } from './fetchService';
 import { classifyLead } from './classificationService';
 import { cachedQuery } from '@/services/queryCache'; // AD-V2-8
+import { getUtmValuesForSource } from '@/config/sourceMapping'; // AD-V3-1
 
 /**
  * Data Service for Dash AwSales
@@ -32,17 +33,92 @@ export const FUNNEL_CONFIG = {
   revenueleakage: { label: 'Revenue Leakage',  pipelines: PIPELINE_FUNNELS.revenueleakage, hasSpending: false },
 };
 
-export const fetchMonthlyMetrics = () => {
-  return cachedQuery('metrics', async () => {
+// ── FR85: Date range filter builder ─────────────────────────────
+function buildDateFilters(years, dateField) {
+  if (!years || years.length === 0) return [];
+  const sortedYears = [...years].sort();
+  const minYear = parseInt(sortedYears[0]);
+  const maxYear = parseInt(sortedYears[sortedYears.length - 1]);
+  // 2025 data starts Mar (validated); other years start Jan
+  const startMonth = minYear === 2025 ? '03' : '01';
+  const startDate = `${minYear}-${startMonth}-01`;
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  let endDate;
+  if (maxYear >= currentYear) {
+    const lastDay = new Date(currentYear, now.getMonth() + 1, 0).getDate();
+    const endMonth = String(now.getMonth() + 1).padStart(2, '0');
+    endDate = `${currentYear}-${endMonth}-${lastDay}`;
+  } else {
+    endDate = `${maxYear}-12-31`;
+  }
+  return [
+    { op: 'gte', field: dateField, value: startDate },
+    { op: 'lte', field: dateField, value: endDate },
+  ];
+}
+
+// ── FR85, FR86: Source filter builder ────────────────────────────
+function buildSourceFilters(sourceFilter, utmField) {
+  if (!sourceFilter || sourceFilter.includes('todos')) return []; // FR80, NFR29
+
+  const allUtmValues = [];
+  let includesStrack = false;
+
+  for (const sourceId of sourceFilter) {
+    if (sourceId === 'strack') {
+      includesStrack = true;
+      const strackValues = getUtmValuesForSource('strack');
+      if (strackValues) allUtmValues.push(...strackValues);
+      continue;
+    }
+    const vals = getUtmValuesForSource(sourceId);
+    if (vals) allUtmValues.push(...vals);
+  }
+
+  if (includesStrack) {
+    // S/Track includes null — use .or() to combine null check with in()
+    const validValues = allUtmValues.filter(v => v !== '' && v != null);
+    const quoted = validValues.map(v => `"${v.replace(/"/g, '""')}"`).join(',');
+    const parts = [`${utmField}.is.null`];
+    if (validValues.length > 0) parts.push(`${utmField}.in.(${quoted})`);
+    // Also match empty-string utm_source (common for S/Track)
+    parts.push(`${utmField}.eq.""`);
+    const orString = parts.join(',');
+    return [{ op: 'or', field: orString }];
+  }
+
+  if (allUtmValues.length > 0) {
+    return [{ op: 'in', field: utmField, value: allUtmValues }];
+  }
+
+  return [];
+}
+
+export const fetchMonthlyMetrics = (years, sourceFilter) => {
+  const currentYear = new Date().getFullYear();
+  const effectiveYears = years && years.length > 0 ? years : [String(currentYear)];
+  const effectiveSource = sourceFilter && sourceFilter.length > 0 ? sourceFilter : ['todos'];
+  const cacheKey = 'metrics-' + JSON.stringify(effectiveYears) + '-' + JSON.stringify(effectiveSource);
+  return cachedQuery(cacheKey, async () => {
     try {
+    // FR85: Build date + source filters per table
+    const yearFilterSales = buildDateFilters(effectiveYears, 'data_fechamento');
+    const yearFilterMeta = buildDateFilters(effectiveYears, 'date_start');
+    const yearFilterGoogle = buildDateFilters(effectiveYears, 'date');
+    const yearFilterYay = buildDateFilters(effectiveYears, 'submitted_at');
+    const yearFilterDeals = buildDateFilters(effectiveYears, 'deal_created_at');
+    // FR86: Source filter only for tables with utm_source column
+    const sourceFilterYay = buildSourceFilters(effectiveSource, 'utm_source');
+
     const TABLE_NAMES = ['sales', 'meta_ads_costs', 'google_ads_costs', 'meta_ads_actions', 'yayforms_responses', 'crm_deals', 'crm_stage_transitions'];
     const settled = await Promise.allSettled([
-      fetchAll('sales', 'id, receita_gerada, data_fechamento, status, email_pipedrive, email_stripe'),
-      fetchAll('meta_ads_costs', 'spend, impressions, date_start'),
-      fetchAll('google_ads_costs', 'spend, impressions, clicks, conversions, date'),
-      fetchAll('meta_ads_actions', 'action_type, value, date_start'),
-      fetchAll('yayforms_responses', 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market'),
-      fetchAll('crm_deals', `deal_created_at, stage_id, pipeline_id, status, value, person_email, won_time, deal_id, lost_reason, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}, ${JSONB_FIELDS.DATA_QUALIFICACAO}`),
+      fetchAll('sales', 'id, receita_gerada, data_fechamento, status, email_pipedrive, email_stripe', yearFilterSales),
+      fetchAll('meta_ads_costs', 'spend, impressions, date_start', yearFilterMeta),
+      fetchAll('google_ads_costs', 'spend, impressions, clicks, conversions, date', yearFilterGoogle),
+      fetchAll('meta_ads_actions', 'action_type, value, date_start', yearFilterMeta),
+      fetchAll('yayforms_responses', 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market', [...yearFilterYay, ...sourceFilterYay]),
+      fetchAll('crm_deals', `deal_created_at, stage_id, pipeline_id, status, value, person_email, won_time, deal_id, lost_reason, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}, ${JSONB_FIELDS.DATA_QUALIFICACAO}`, yearFilterDeals),
       fetchAll('crm_stage_transitions', 'deal_id, to_stage_id, time_in_previous_stage_sec')
     ]);
 
@@ -70,12 +146,24 @@ export const fetchMonthlyMetrics = () => {
       { data: stageTransitions }
     ] = results;
 
+    // ── FR86: In-memory source filter for crm_deals via lead email cross-reference ──
+    // When sourceFilter is active (!= 'todos'), only keep deals whose person_email
+    // matches a lead email from the already source-filtered yayforms_responses.
+    let dealsFiltered = dealsRaw;
+    if (!effectiveSource.includes('todos') && leads && dealsRaw) {
+      const leadEmailSet = new Set(leads.map(l => l.lead_email?.toLowerCase().trim()).filter(Boolean));
+      dealsFiltered = dealsRaw.filter(d => {
+        const email = d.person_email?.toLowerCase().trim();
+        return email && leadEmailSet.has(email);
+      });
+    }
+
     // ── Pre-compute shared lookup maps (used by both modes) ─────
 
     const dealDateByEmail = {};
     const dealFunnelByEmail = {};
-    if (dealsRaw) {
-      dealsRaw.forEach(d => {
+    if (dealsFiltered) {
+      dealsFiltered.forEach(d => {
         if (d.person_email && d.deal_created_at) {
           const emailKey = d.person_email.toLowerCase().trim();
           if (!dealDateByEmail[emailKey]) dealDateByEmail[emailKey] = d.deal_created_at;
@@ -236,8 +324,12 @@ export const fetchMonthlyMetrics = () => {
         });
       }
 
+      // FR90: source-aware ads processing
+      const includeMetaAds = effectiveSource.includes('todos') || effectiveSource.includes('meta');
+      const includeGoogleAds = effectiveSource.includes('todos') || effectiveSource.includes('google');
+
       // ── Process Meta Ads (same for both modes) ─────────────────
-      if (metaAds) {
+      if (metaAds && includeMetaAds) {
         metaAds.forEach(row => {
           const mk = getMonthKey(row.date_start);
           const wk = getWeekKey(row.date_start);
@@ -252,7 +344,7 @@ export const fetchMonthlyMetrics = () => {
       }
 
       // ── Process Google Ads (same for both modes) ───────────────
-      if (googleAds) {
+      if (googleAds && includeGoogleAds) {
         googleAds.forEach(row => {
           const mk = getMonthKey(row.date);
           const wk = getWeekKey(row.date);
@@ -271,7 +363,7 @@ export const fetchMonthlyMetrics = () => {
       }
 
       // ── Process Meta Actions (same for both modes) ─────────────
-      if (metaActions) {
+      if (metaActions && includeMetaAds) {
         metaActions.forEach(act => {
           const mk = getMonthKey(act.date_start);
           const wk = getWeekKey(act.date_start);
@@ -316,8 +408,8 @@ export const fetchMonthlyMetrics = () => {
       }
 
       // ── Process CRM Deals (mode-aware for SQL/reunião dates) ───
-      if (dealsRaw) {
-        dealsRaw.forEach(d => {
+      if (dealsFiltered) {
+        dealsFiltered.forEach(d => {
           const baseMk = getMonthKey(d.deal_created_at);
           const baseWk = getWeekKey(d.deal_created_at);
           if (!baseMk) return;

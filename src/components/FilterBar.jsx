@@ -1,4 +1,5 @@
 import { useMetrics } from '../contexts/MetricsContext';
+import { SOURCE_OPTIONS } from '@/config/sourceMapping';
 import Pill from './Pill';
 
 const EASE_APPLE = "all 300ms cubic-bezier(0.4, 0, 0.2, 1)";
@@ -86,14 +87,16 @@ function HeatmapDot({ active, onClick }) {
 
 export default function FilterBar({ dk }) {
   const {
-    year, setYear, viewMode, setViewMode,
+    years, toggleYear, sourceFilter, toggleSource,
+    viewMode, setViewMode,
     selectedFunnels, setSelectedFunnels, toggleFunnel,
     mode, setMode, heat, setHeat,
     FUNNELS, ALL_FUNNELS,
   } = useMetrics();
 
   const currentYear = new Date().getFullYear();
-  const years = [String(currentYear - 1), String(currentYear)];
+  const availableYears = [String(currentYear - 1), String(currentYear)];
+  const isMultiYear = years.length > 1;
 
   const allSelected = ALL_FUNNELS.length > 0 && ALL_FUNNELS.every(k => selectedFunnels.includes(k));
 
@@ -107,11 +110,11 @@ export default function FilterBar({ dk }) {
           flexWrap: "wrap", minHeight: 36,
         }}
       >
-        {/* ANO */}
+        {/* ANO — multi-select (FR77) */}
         <LayerLabel>Ano</LayerLabel>
-        <div role="tablist" aria-label="Seleção de ano" style={{ display: "flex", background: "var(--color-background-secondary)", borderRadius: 20, padding: 2 }}>
-          {years.map(y => (
-            <Pill key={y} active={year === y} onClick={() => setYear(y)}>{y}</Pill>
+        <div role="group" aria-label="Seleção de ano" style={{ display: "flex", background: "var(--color-background-secondary)", borderRadius: 20, padding: 2 }}>
+          {availableYears.map(y => (
+            <Pill key={y} active={years.includes(y)} disabled={years.length === 1 && years.includes(y)} onClick={() => toggleYear(y)} style={isMultiYear ? { fontSize: 10 } : undefined}>{y}</Pill>
           ))}
         </div>
 
@@ -129,6 +132,16 @@ export default function FilterBar({ dk }) {
           <Pill accent active={allSelected} onClick={() => setSelectedFunnels(ALL_FUNNELS)}>Todos</Pill>
           {FUNNELS.map(f => (
             <Pill key={f.key} accent active={selectedFunnels.includes(f.key)} onClick={() => toggleFunnel(f.key)}>{f.label}</Pill>
+          ))}
+        </div>
+
+        <Separator dk={dk} />
+
+        {/* SOURCE — multi-select (FR78, FR84) */}
+        <LayerLabel>Source</LayerLabel>
+        <div role="group" aria-label="Filtro por fonte" style={{ display: "flex", background: "var(--color-background-secondary)", borderRadius: 20, padding: 2 }}>
+          {SOURCE_OPTIONS.map(opt => (
+            <Pill key={opt.id} accent active={sourceFilter.includes(opt.id)} onClick={() => toggleSource(opt.id)}>{opt.label}</Pill>
           ))}
         </div>
 

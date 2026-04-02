@@ -1,6 +1,13 @@
 /**
- * UI helper utilities — heatmap colors, hex conversion.
+ * UI helper utilities — heatmap colors, hex conversion, date defaults.
  */
+
+/** Default year for filters: current year, or previous year if ≤7 Jan (UX-DR21). */
+export function getInitialYear() {
+  const now = new Date();
+  if (now.getDate() <= 7 && now.getMonth() === 0) return String(now.getFullYear() - 1);
+  return String(now.getFullYear());
+}
 
 export function hexToRgb(hex) {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);

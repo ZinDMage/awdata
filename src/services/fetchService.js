@@ -5,7 +5,9 @@ import { supabase } from './supabaseClient';
  * Batches of 1000 records. Normalizes emails with trim() + toLowerCase() (AD-6, FR20).
  * Errors per table don't crash the app (NFR12).
  */
-export async function fetchAll(table, selectStr) {
+const ALLOWED_FILTER_OPS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'is', 'or']);
+
+export async function fetchAll(table, selectStr, filters) {
   // AD-V2-1: Nunca select('*') — NFR22
   if (!selectStr || selectStr.includes('*')) {
     console.warn(`[fetchAll] ⚠️ select("*") detectado para tabela "${table}" — use colunas explícitas (QUERY_COLUMNS)`);
@@ -14,7 +16,22 @@ export async function fetchAll(table, selectStr) {
   let from = 0;
   const size = 1000;
   while (true) {
-    const { data, error } = await supabase.from(table).select(selectStr).range(from, from + size - 1);
+    let query = supabase.from(table).select(selectStr);
+    // FR85: Apply filters before pagination
+    if (filters && filters.length > 0) {
+      for (const f of filters) {
+        if (!ALLOWED_FILTER_OPS.has(f.op)) {
+          console.error(`[fetchAll] Invalid filter op "${f.op}" for table "${table}" — skipped`);
+          continue;
+        }
+        if (f.op === 'or') {
+          query = query.or(f.field); // .or() receives filter string directly
+        } else {
+          query = query[f.op](f.field, f.value);
+        }
+      }
+    }
+    const { data, error } = await query.range(from, from + size - 1);
     if (error) {
       console.error(`Supabase Error on ${table}:`, error);
       console.warn(`[fetchAll] Tabela "${table}" falhou — retornando dados parciais`);

@@ -1,6 +1,10 @@
-import { createContext, useContext, useState, useMemo, useCallback, useEffect } from 'react';
+import { createContext, useContext, useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { fetchMonthlyMetrics, PIPELINE_FUNNELS } from '@/services/dataService';
 import { FUNNEL_LABELS } from '@/config/pipedrive';
+import { SOURCE_OPTIONS } from '@/config/sourceMapping';
+import { getInitialYear } from '@/utils/helpers';
+
+const VALID_SOURCE_IDS = SOURCE_OPTIONS.map(o => o.id);
 
 const MESES = [
   { key: "jan", label: "Jan" }, { key: "fev", label: "Fev" }, { key: "mar", label: "Mar" },
@@ -30,13 +34,6 @@ function getInitialMonth() {
   return MESES[month].key;
 }
 
-function getInitialYear() {
-  const now = new Date();
-  const day = now.getDate();
-  const month = now.getMonth();
-  if (day <= 7 && month === 0) return String(now.getFullYear() - 1);
-  return String(now.getFullYear());
-}
 
 const HEAT_SECTIONS_DEFAULT = { principal: false, premissas: true, numeros: false, financeiro: true, dt: false };
 
@@ -49,6 +46,8 @@ export function MetricsProvider({ children }) {
   const [error, setError] = useState(null);
   const [fetchTimestamp, setFetchTimestamp] = useState(null);
   const [partialData, setPartialData] = useState(false);
+  const [isRefetching, setIsRefetching] = useState(false); // AD-V3-2: distinguishes mount vs re-fetch
+  const isInitialMount = useRef(true);
 
   // ── Safe storage access (Safari private browsing guard) ──
   const safeGet = (storage, key, fallback) => {
@@ -63,7 +62,33 @@ export function MetricsProvider({ children }) {
   const [viewMode, setViewMode] = useState(() => safeGet(localStorage, 'awdata-viewMode', 'performance'));
 
   // ── Temporal controls (UX-DR21: persisted in sessionStorage) ──
-  const [year, setYear] = useState(() => safeGet(sessionStorage, 'awdata-year', getInitialYear()));
+  // V3: years[] replaces year — multi-year support (AD-V3-2)
+  const [years, setYearsRaw] = useState(() => {
+    const stored = safeGet(sessionStorage, 'awdata-years', null);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(y => /^\d{4}$/.test(y))) return parsed;
+      } catch { /* fallback */ }
+    }
+    // Migration path: read legacy key
+    const legacyYear = safeGet(sessionStorage, 'awdata-year', null);
+    if (legacyYear && /^\d{4}$/.test(legacyYear)) {
+      try { sessionStorage.removeItem('awdata-year'); } catch { /* ignore */ }
+      return [legacyYear];
+    }
+    return [getInitialYear()];
+  });
+  // Adapter: derived year for legacy V1/V2 code
+  const year = useMemo(() => years[0], [years]);
+  // Stable callbacks
+  const setYears = useCallback(arr => setYearsRaw([...arr].sort().reverse()), []);
+  const setYear = useCallback(y => setYearsRaw([y]), []);
+  const toggleYear = useCallback(y =>
+    setYearsRaw(p => {
+      const next = p.includes(y) ? (p.length > 1 ? p.filter(v => v !== y) : p) : [...p, y];
+      return next.sort().reverse();
+    }), []);
   // Patch #9: validate mode against allowlist
   const VALID_MODES = ['single', 'multi', 'semanas'];
   const [mode, setMode] = useState(() => {
@@ -106,6 +131,39 @@ export function MetricsProvider({ children }) {
     return SEMANAS.map(s => s.key);
   });
 
+  // ── V3: Source filter (AD-V3-2) ──
+  const [sourceFilter, setSourceFilterRaw] = useState(() => {
+    const stored = safeGet(sessionStorage, 'awdata-source', null);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(id => VALID_SOURCE_IDS.includes(id))) return parsed;
+      } catch { /* fallback */ }
+    }
+    return ['todos'];
+  });
+  const setSourceFilter = useCallback(arr => {
+    if (arr.includes('todos')) return setSourceFilterRaw(['todos']);
+    const specific = VALID_SOURCE_IDS.filter(x => x !== 'todos');
+    if (specific.every(s => arr.includes(s))) return setSourceFilterRaw(['todos']);
+    setSourceFilterRaw([...arr]);
+  }, []);
+  const toggleSource = useCallback(id => {
+    setSourceFilterRaw(prev => {
+      if (id === 'todos') return ['todos'];
+      if (prev.includes('todos')) return [id];
+      if (prev.includes(id)) {
+        const next = prev.filter(s => s !== id);
+        return next.length === 0 ? ['todos'] : next;
+      }
+      const next = [...prev, id];
+      // Auto-collapse: all specific sources selected → 'todos'
+      const specificIds = VALID_SOURCE_IDS.filter(x => x !== 'todos');
+      if (specificIds.every(s => next.includes(s))) return ['todos'];
+      return next;
+    });
+  }, []);
+
   // ── UI state — Story 8.1 AC#8: persisted selectedFunnels (session) + heat (local) ──
   const [selectedFunnels, setSelectedFunnels] = useState(() => {
     const stored = safeGet(sessionStorage, 'awdata-funnels', null);
@@ -133,7 +191,7 @@ export function MetricsProvider({ children }) {
   useEffect(() => { safeSet(localStorage, 'awdata-heat', String(heat)); }, [heat]);
 
   // ── Persist temporal controls to sessionStorage ──
-  useEffect(() => { safeSet(sessionStorage, 'awdata-year', year); }, [year]);
+  useEffect(() => { safeSet(sessionStorage, 'awdata-years', JSON.stringify(years)); }, [years]);
   useEffect(() => { safeSet(sessionStorage, 'awdata-mode', mode); }, [mode]);
   useEffect(() => { safeSet(sessionStorage, 'awdata-sM', sM); }, [sM]);
   useEffect(() => { safeSet(sessionStorage, 'awdata-mM', JSON.stringify(mM)); }, [mM]);
@@ -141,32 +199,83 @@ export function MetricsProvider({ children }) {
   useEffect(() => { safeSet(sessionStorage, 'awdata-sW', JSON.stringify(sW)); }, [sW]);
   // Story 8.1 AC#8: persist selectedFunnels to sessionStorage
   useEffect(() => { safeSet(sessionStorage, 'awdata-funnels', JSON.stringify(selectedFunnels)); }, [selectedFunnels]);
+  // V3: persist sourceFilter
+  useEffect(() => { safeSet(sessionStorage, 'awdata-source', JSON.stringify(sourceFilter)); }, [sourceFilter]);
 
-  // ── Fetch data on mount ──
+  // ── Migrate temporal keys when multi-year changes ──
+  // mM/sM/wM use plain keys ("abr") in single-year but composite ("2026-abr") in multi-year.
+  // When toggling years, migrate to avoid stale keys that don't match pills.
+  const isMultiYear = years.length > 1;
   useEffect(() => {
-    fetchMonthlyMetrics()
+    if (isMultiYear) {
+      // Single→Multi: convert plain keys to composite using current primary year
+      const yr = years[0]; // most recent year (sorted reverse)
+      setMM(prev => {
+        if (prev.length > 0 && !prev[0].includes('-')) {
+          return prev.map(m => `${yr}-${m}`);
+        }
+        return prev;
+      });
+      setSM(prev => prev.includes('-') ? prev : `${yr}-${prev}`);
+      setWM(prev => prev.includes('-') ? prev : `${yr}-${prev}`);
+    } else {
+      // Multi→Single: strip year prefix
+      const stripYear = k => k.includes('-') ? k.split('-')[1] : k;
+      setMM(prev => {
+        if (prev.length > 0 && prev[0].includes('-')) {
+          // Keep only unique month parts
+          const unique = [...new Set(prev.map(stripYear))];
+          return unique;
+        }
+        return prev;
+      });
+      setSM(prev => stripYear(prev));
+      setWM(prev => stripYear(prev));
+    }
+  }, [isMultiYear]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Fetch data on mount + re-fetch when years/sourceFilter change (AD-V3-2) ──
+  const yearsKey = JSON.stringify(years);
+  const sourceKey = JSON.stringify(sourceFilter);
+  useEffect(() => {
+    const isMount = isInitialMount.current;
+    isInitialMount.current = false;
+
+    if (isMount) {
+      setLoading(true);
+    } else {
+      setIsRefetching(true); // stale-while-revalidate: keep old data visible
+    }
+
+    fetchMonthlyMetrics(years, sourceFilter)
       .then(res => {
         setRawData(res);
         setFetchTimestamp(new Date());
         setPartialData(!!res._partialData);
         setLoading(false);
+        setIsRefetching(false);
       })
       .catch(err => {
         console.error("Error fetching metrics:", err);
-        setError(err);
+        if (isMount) {
+          setError(err); // Only clobber data on initial mount failure
+        } else {
+          console.warn("[MetricsContext] Re-fetch failed — keeping previous data (stale-while-revalidate)");
+        }
         setLoading(false);
+        setIsRefetching(false);
       });
-  }, []);
+  }, [yearsKey, sourceKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Retry fetch ──
+  // ── Retry fetch (AD-V3-2: passes current years/sourceFilter) ──
   const retry = useCallback(() => {
     setError(null);
     setLoading(true);
     setPartialData(false);
-    fetchMonthlyMetrics()
+    fetchMonthlyMetrics(years, sourceFilter)
       .then(res => { setRawData(res); setFetchTimestamp(new Date()); setPartialData(!!res._partialData); setLoading(false); })
       .catch(err => { console.error("Error fetching metrics:", err); setError(err); setPartialData(false); setLoading(false); });
-  }, []);
+  }, [yearsKey, sourceKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Callbacks ──
   const toggleFunnel = useCallback(k =>
@@ -190,19 +299,23 @@ export function MetricsProvider({ children }) {
     // Data
     rawData,
     loading,
+    isRefetching,
     error,
     retry,
     fetchTimestamp,
     partialData,
     // View mode
     viewMode, setViewMode,
-    // Temporal
+    // Temporal — V3: years[] + legacy adapter year
+    years, setYears, toggleYear,
     year, setYear,
     mode, setMode,
     sM, setSM,
     mM, setMM,
     wM, setWM,
     sW, setSW, toggleWeek,
+    // V3: Source filter
+    sourceFilter, setSourceFilter, toggleSource,
     // Funnels
     selectedFunnels, setSelectedFunnels, toggleFunnel,
     // Heatmap
@@ -215,8 +328,8 @@ export function MetricsProvider({ children }) {
     toggleMultiMonth,
     // Constants
     MESES, SEMANAS, FUNNELS, ALL_FUNNELS, PIPELINE_FUNNELS,
-  }), [rawData, loading, error, retry, fetchTimestamp, partialData, viewMode, year, mode, sM, mM, wM, sW, selectedFunnels, heat, heatConfig, heatSections, coll,
-       toggleFunnel, toggleColl, toggleMultiMonth, toggleWeek, toggleHeatSection]);
+  }), [rawData, loading, isRefetching, error, retry, fetchTimestamp, partialData, viewMode, years, year, sourceFilter, mode, sM, mM, wM, sW, selectedFunnels, heat, heatConfig, heatSections, coll,
+       setYears, toggleYear, setYear, setSourceFilter, toggleSource, toggleFunnel, toggleColl, toggleMultiMonth, toggleWeek, toggleHeatSection]);
 
   return (
     <MetricsContext.Provider value={value}>
@@ -231,4 +344,4 @@ export function useMetrics() {
   return ctx;
 }
 
-export { MESES, SEMANAS, FUNNELS, ALL_FUNNELS };
+export { MESES, SEMANAS, FUNNELS, ALL_FUNNELS, SOURCE_OPTIONS };

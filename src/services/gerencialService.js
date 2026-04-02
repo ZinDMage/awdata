@@ -5,6 +5,7 @@ import { resolveBatch } from '@/utils/dataPrecedence';
 import { classifyLead } from '@/services/classificationService';
 import { normalizeEmail, deduplicateYayforms, fetchAll } from '@/services/fetchService';
 import { cachedQuery } from '@/services/queryCache'; // AD-V2-8
+import { getUtmValuesForSource } from '@/config/sourceMapping'; // FR89: source filtering
 
 // ── Data mínima: só trabalhamos com dados a partir de 2026 ──
 const DATA_START_DATE = '2026-01-01';
@@ -75,39 +76,80 @@ function applyFunnelFilter(query, funnel) {
   return query.in('pipeline_id', pipelineIds);
 }
 
+// ── Helper: aplica filtro de source na query (FR89) ──
+// Usar APENAS em tabelas com coluna utm_source (ex: yayforms_responses).
+// Para crm_deals, usar email cross-ref com leads filtrados.
+function applySourceFilter(query, sourceFilter, utmField = 'utm_source') {
+  if (!sourceFilter || sourceFilter.includes('todos')) return query; // FR80, NFR29
+
+  const allUtmValues = [];
+  let includesStrack = false;
+
+  for (const sourceId of sourceFilter) {
+    if (sourceId === 'strack') {
+      includesStrack = true;
+      const sv = getUtmValuesForSource('strack');
+      if (sv) allUtmValues.push(...sv);
+      continue;
+    }
+    const vals = getUtmValuesForSource(sourceId);
+    if (vals) allUtmValues.push(...vals);
+  }
+
+  if (includesStrack) {
+    const validValues = allUtmValues.filter(v => v !== '' && v != null);
+    const quoted = validValues.map(v => `"${v.replace(/"/g, '""')}"`).join(',');
+    const parts = [`${utmField}.is.null`];
+    if (validValues.length > 0) parts.push(`${utmField}.in.(${quoted})`);
+    parts.push(`${utmField}.eq.""`); // empty-string utm_source (common for S/Track)
+    return query.or(parts.join(','));
+  }
+
+  if (allUtmValues.length > 0) {
+    return query.in(utmField, allUtmValues);
+  }
+
+  return query;
+}
+
 /**
  * Query analítica por período — Bowtie (AD-V2-1).
  * Deals agrupados por stage, com contagens, conversões e tempos médios.
  */
-export async function fetchBowtieData(startMonth, endMonth, funnel) {
-  return cachedQuery(`bowtie:${startMonth}:${endMonth}:${funnel || 'todos'}`, async () => {
+export async function fetchBowtieData(startMonth, endMonth, funnel, sourceFilter) {
+  const sourceKey = JSON.stringify(sourceFilter || ['todos']);
+  return cachedQuery(`bowtie:${startMonth}:${endMonth}:${funnel || 'todos'}:${sourceKey}`, async () => {
   try {
     const pipelineIds = getFunnelPipelineIds(funnel);
 
     // ── Tentar RPC para counts SQL-only + avgTimes (Story 5.4) ──
+    // FR89: Skip RPC when sourceFilter is active — RPC doesn't support source filtering
+    const hasSourceFilter = sourceFilter && !sourceFilter.includes('todos');
     let rpcCounts = null;
     let rpcAvgTimes = null;
-    try {
-      const { data, error } = await supabase.rpc('get_bowtie_stats', {
-        p_start_month: startMonth,
-        p_end_month: endMonth,
-        p_pipeline_ids: pipelineIds
-      });
-      if (error) throw error;
+    if (!hasSourceFilter) {
+      try {
+        const { data, error } = await supabase.rpc('get_bowtie_stats', {
+          p_start_month: startMonth,
+          p_end_month: endMonth,
+          p_pipeline_ids: pipelineIds
+        });
+        if (error) throw error;
 
-      rpcCounts = {};
-      rpcAvgTimes = {};
-      for (const row of data) {
-        rpcCounts[row.stage] = Number(row.count);
-        rpcAvgTimes[row.stage] = Number(row.avg_time_days);
+        rpcCounts = {};
+        rpcAvgTimes = {};
+        for (const row of data) {
+          rpcCounts[row.stage] = Number(row.count);
+          rpcAvgTimes[row.stage] = Number(row.avg_time_days);
+        }
+      } catch (rpcErr) {
+        console.warn('[gerencialService] RPC get_bowtie_stats failed, full fallback:', rpcErr);
       }
-    } catch (rpcErr) {
-      console.warn('[gerencialService] RPC get_bowtie_stats failed, full fallback:', rpcErr);
     }
 
-    // ── Se RPC falhou, fallback completo (método antigo) ──
+    // ── Se RPC falhou ou sourceFilter ativo, fallback completo (método antigo) ──
     if (!rpcCounts) {
-      const deals = await paginatedQuery(() => {
+      let allDeals = await paginatedQuery(() => {
         let q = supabase
           .from('crm_deals')
           .select(`id, stage_id, stage_name, status, deal_created_at, close_time, value, pipeline_id, person_email, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}`)
@@ -115,19 +157,40 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
           .lt('deal_created_at', getNextMonth(endMonth));
         return applyFunnelFilter(q, funnel);
       });
-      if (!deals?.length) return { stages: [], conversions: [], avgTimes: [] };
+      if (!allDeals?.length) return { stages: [], conversions: [], avgTimes: [] };
 
+      // FR89: source filter via email cross-ref with yayforms
+      let sourceAllowEmails = null;
+      if (hasSourceFilter) {
+        const sourceYay = await paginatedQuery(() => {
+          let q = supabase
+            .from('yayforms_responses')
+            .select('lead_email, submitted_at')
+            .gte('submitted_at', `${startMonth}-01`)
+            .lt('submitted_at', getNextMonth(endMonth));
+          return applySourceFilter(q, sourceFilter);
+        });
+        sourceAllowEmails = new Set(sourceYay.map(r => normalizeEmail(r.lead_email)).filter(Boolean));
+        allDeals = allDeals.filter(d => {
+          const email = d.person_email?.trim()?.toLowerCase();
+          return email && sourceAllowEmails.has(email);
+        });
+        if (!allDeals.length) return { stages: [], conversions: [], avgTimes: [], perda: 0, resultado: 0 };
+      }
+
+      const deals = allDeals;
       const counts = { lead: 0, mql: 0, sql: 0, reuniao_ag: 0, reuniao_real: 0, vendas: 0, contrato: 0 };
 
       const isInboundScope = !funnel || funnel === 'todos' || funnel === 'inbound';
       if (isInboundScope) {
-        const yayData = await paginatedQuery(() =>
-          supabase
+        const yayData = await paginatedQuery(() => {
+          let q = supabase
             .from('yayforms_responses')
             .select('lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market, submitted_at')
             .gte('submitted_at', `${startMonth}-01`)
-            .lt('submitted_at', getNextMonth(endMonth))
-        );
+            .lt('submitted_at', getNextMonth(endMonth));
+          return applySourceFilter(q, sourceFilter); // FR89
+        });
         if (yayData.length) {
           const normalized = yayData.map(r => ({ ...r, lead_email: normalizeEmail(r.lead_email) }));
           const deduped = deduplicateYayforms(normalized);
@@ -326,9 +389,10 @@ export async function fetchBowtieData(startMonth, endMonth, funnel) {
  * Enriquece com dados YayForms via dataPrecedence (FR75).
  * tabKey: chave da STAGE_TABS (para identificar perda/resultado)
  */
-export async function fetchStageDeals(stageIds, funnel, tabKey) {
+export async function fetchStageDeals(stageIds, funnel, tabKey, sourceFilter) {
   const sortedIds = stageIds ? [...stageIds].sort().join(',') : '';
-  return cachedQuery(`deals:${sortedIds}:${funnel || 'todos'}:${tabKey}`, async () => {
+  const sourceKey = JSON.stringify(sourceFilter || ['todos']);
+  return cachedQuery(`deals:${sortedIds}:${funnel || 'todos'}:${tabKey}:${sourceKey}`, async () => {
   try {
     let query = supabase.from('crm_deals').select('id, title, person_name, person_email, person_phone, value, stage_id, stage_name, status, pipeline_id, deal_created_at, close_time, lost_time, lost_reason, custom_fields'); // AD-V2-9: colunas explícitas (custom_fields mantido para DealsTable/resolveBatch)
 
@@ -351,8 +415,27 @@ export async function fetchStageDeals(stageIds, funnel, tabKey) {
     if (error) throw error;
     if (!deals?.length) return [];
 
+    // FR89: source filter via email cross-ref with yayforms
+    const hasSourceFilter = sourceFilter && !sourceFilter.includes('todos');
+    let filteredDeals = deals;
+    if (hasSourceFilter) {
+      const sourceYay = await paginatedQuery(() => {
+        let q = supabase
+          .from('yayforms_responses')
+          .select('lead_email')
+          .gte('submitted_at', DATA_START_DATE);
+        return applySourceFilter(q, sourceFilter);
+      });
+      const allowEmails = new Set(sourceYay.map(r => normalizeEmail(r.lead_email)).filter(Boolean));
+      filteredDeals = deals.filter(d => {
+        const email = d.person_email?.trim()?.toLowerCase();
+        return email && allowEmails.has(email);
+      });
+      if (!filteredDeals.length) return [];
+    }
+
     // Enriquecer com dados YayForms (FR75)
-    return await resolveBatch(deals, supabase);
+    return await resolveBatch(filteredDeals, supabase);
   } catch (err) {
     console.error('[gerencialService] fetchStageDeals error:', err);
     return [];
@@ -365,13 +448,16 @@ export async function fetchStageDeals(stageIds, funnel, tabKey) {
  * Approach híbrido: RPC para sql/reuniao/proposta/contrato/perda/resultado,
  * MQL mantém client-side com classifyLead (AD-V2-8, Story 5.4).
  */
-export async function fetchPillCounts(funnel) {
-  return cachedQuery(`pills:${funnel || 'todos'}`, async () => {
+export async function fetchPillCounts(funnel, sourceFilter) {
+  const sourceKey = JSON.stringify(sourceFilter || ['todos']);
+  return cachedQuery(`pills:${funnel || 'todos'}:${sourceKey}`, async () => {
   try {
     const pipelineIds = getFunnelPipelineIds(funnel);
+    const hasSourceFilter = sourceFilter && !sourceFilter.includes('todos');
 
     // ── Tentar RPC primeiro (Story 5.4) ──
-    try {
+    // FR89: Skip RPC when sourceFilter is active
+    if (!hasSourceFilter) try {
       const { data: rpcData, error: rpcError } = await supabase.rpc('get_pill_counts', {
         p_pipeline_ids: pipelineIds
       });
@@ -409,7 +495,7 @@ export async function fetchPillCounts(funnel) {
     }
 
     // ── Fallback: método antigo (paginação client-side completa) ──
-    const deals = await paginatedQuery(() => {
+    let deals = await paginatedQuery(() => {
       let q = supabase
         .from('crm_deals')
         .select(`id, stage_id, status, person_email, person_phone, custom_fields, ${JSONB_FIELDS.SQL_FLAG}, ${JSONB_FIELDS.DATA_REUNIAO}, ${JSONB_FIELDS.REUNIAO_REALIZADA}`)
@@ -417,6 +503,23 @@ export async function fetchPillCounts(funnel) {
         .gte('deal_created_at', DATA_START_DATE);
       return applyFunnelFilter(q, funnel);
     });
+
+    // FR89: source filter via email cross-ref with yayforms
+    let sourceAllowEmails = null;
+    if (hasSourceFilter) {
+      const sourceYay = await paginatedQuery(() => {
+        let q = supabase
+          .from('yayforms_responses')
+          .select('lead_email')
+          .gte('submitted_at', DATA_START_DATE);
+        return applySourceFilter(q, sourceFilter);
+      });
+      sourceAllowEmails = new Set(sourceYay.map(r => normalizeEmail(r.lead_email)).filter(Boolean));
+      deals = deals.filter(d => {
+        const email = d.person_email?.trim()?.toLowerCase();
+        return email && sourceAllowEmails.has(email);
+      });
+    }
 
     const sqlSimVal = CUSTOM_FIELDS.SQL_FLAG.values.SIM;
     const reuniaoRealizadaSim = CUSTOM_FIELDS.REUNIAO_REALIZADA.values.SIM;
@@ -459,23 +562,41 @@ export async function fetchPillCounts(funnel) {
       }
     }
 
-    let lostQuery = supabase
-      .from('crm_deals')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'lost')
-      .gte('deal_created_at', DATA_START_DATE);
-    lostQuery = applyFunnelFilter(lostQuery, funnel);
+    // FR89: lost/won counts — when source filter active, use email cross-ref
+    if (hasSourceFilter && sourceAllowEmails) {
+      const [lostDeals, wonDeals] = await Promise.all([
+        paginatedQuery(() => {
+          let q = supabase.from('crm_deals').select('person_email')
+            .eq('status', 'lost').gte('deal_created_at', DATA_START_DATE);
+          return applyFunnelFilter(q, funnel);
+        }),
+        paginatedQuery(() => {
+          let q = supabase.from('crm_deals').select('person_email')
+            .eq('status', 'won').gte('deal_created_at', DATA_START_DATE);
+          return applyFunnelFilter(q, funnel);
+        }),
+      ]);
+      counts.perda = lostDeals.filter(d => { const e = d.person_email?.trim()?.toLowerCase(); return e && sourceAllowEmails.has(e); }).length;
+      counts.resultado = wonDeals.filter(d => { const e = d.person_email?.trim()?.toLowerCase(); return e && sourceAllowEmails.has(e); }).length;
+    } else {
+      let lostQuery = supabase
+        .from('crm_deals')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'lost')
+        .gte('deal_created_at', DATA_START_DATE);
+      lostQuery = applyFunnelFilter(lostQuery, funnel);
 
-    let wonQuery = supabase
-      .from('crm_deals')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'won')
-      .gte('deal_created_at', DATA_START_DATE);
-    wonQuery = applyFunnelFilter(wonQuery, funnel);
+      let wonQuery = supabase
+        .from('crm_deals')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'won')
+        .gte('deal_created_at', DATA_START_DATE);
+      wonQuery = applyFunnelFilter(wonQuery, funnel);
 
-    const [{ count: lostCount }, { count: wonCount }] = await Promise.all([lostQuery, wonQuery]);
-    counts.perda = lostCount || 0;
-    counts.resultado = wonCount || 0;
+      const [{ count: lostCount }, { count: wonCount }] = await Promise.all([lostQuery, wonQuery]);
+      counts.perda = lostCount || 0;
+      counts.resultado = wonCount || 0;
+    }
 
     return counts;
   } catch (err) {
