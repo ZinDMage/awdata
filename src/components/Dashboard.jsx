@@ -7,8 +7,10 @@ import MetricsView from './MetricsView';
 import ConfigPanel from './ConfigPanel';
 import SkeletonLoader from './SkeletonLoader';
 import { GerencialProvider } from '@/contexts/GerencialContext';
+import { MarketingProvider } from '@/contexts/MarketingContext'; // D2: provider lifted
 
 const GerencialView = lazy(() => import('./GerencialView'));
+const MarketingView = lazy(() => import('./MarketingView')); // P3: lazy like GerencialView
 
 function useDarkMode() {
   const [dk, setDk] = useState(() =>
@@ -133,6 +135,7 @@ export default function Dashboard({ session }) {
   }
 
   return (
+    <MarketingProvider>
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden", fontFamily: "var(--font-sans)", WebkitFontSmoothing: "antialiased", background: "var(--color-background-primary)" }}>
       <Sidebar
         sidebarState={sidebarState}
@@ -157,7 +160,13 @@ export default function Dashboard({ session }) {
               </Suspense>
             )}
 
-            {currentView !== "metricas" && currentView !== "config" && currentView !== "gerencial" && (
+            {currentView === "marketing" && (
+              <Suspense fallback={<SkeletonLoader />}>
+                <MarketingView />
+              </Suspense>
+            )}
+
+            {currentView !== "metricas" && currentView !== "config" && currentView !== "gerencial" && currentView !== "marketing" && (
               <div style={{ textAlign: "center", padding: "100px 0", color: "var(--color-text-tertiary)" }}>
                 <div style={{ fontSize: 48, marginBottom: 16 }}>🚧</div>
                 <div style={{ fontSize: 20, fontWeight: 700, color: "var(--color-text-primary)", letterSpacing: "-0.02em" }}>Em construção</div>
@@ -188,5 +197,6 @@ export default function Dashboard({ session }) {
         </div>
       </div>
     </div>
+    </MarketingProvider>
   );
 }

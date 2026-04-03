@@ -278,10 +278,18 @@ export function MetricsProvider({ children }) {
   }, [yearsKey, sourceKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Callbacks ──
+  // UX rule: at least one funnel must always be selected.
+  // Deselecting the last one resets to ALL_FUNNELS; selecting all individually collapses to ALL_FUNNELS.
   const toggleFunnel = useCallback(k =>
-    setSelectedFunnels(p =>
-      p.includes(k) ? (p.length > 1 ? p.filter(f => f !== k) : p) : [...p, k]
-    ), []);
+    setSelectedFunnels(p => {
+      if (p.includes(k)) {
+        const next = p.filter(f => f !== k);
+        return next.length === 0 ? [...ALL_FUNNELS] : next;
+      }
+      const next = [...p, k];
+      if (ALL_FUNNELS.every(f => next.includes(f))) return [...ALL_FUNNELS];
+      return next;
+    }), []);
 
   const toggleColl = useCallback(id =>
     setColl(p => ({ ...p, [id]: !p[id] })), []);

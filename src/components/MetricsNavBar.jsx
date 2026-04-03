@@ -2,6 +2,7 @@ import { useMemo, useCallback } from 'react';
 import { useMetrics } from '../contexts/MetricsContext';
 import { SOURCE_OPTIONS } from '@/config/sourceMapping';
 import Pill from './Pill';
+import AnimatedDropdown from './ui/animated-dropdown';
 
 const EASE_APPLE = "all 300ms cubic-bezier(0.4, 0, 0.2, 1)";
 
@@ -56,8 +57,6 @@ export default function MetricsNavBar() {
     if (months.size === 0) return new Set(isMultiYear ? years.flatMap(yr => MESES.map(m => yr + '-' + m.key)) : MESES.map(m => m.key));
     return months;
   }, [rawData, MESES, years, isMultiYear]);
-
-  const allSelected = ALL_FUNNELS.length > 0 && ALL_FUNNELS.every(k => selectedFunnels.includes(k));
 
   const weekMonthLabel = useMemo(() => {
     const monthKey = wM.includes('-') ? wM.split('-')[1] : wM;
@@ -128,7 +127,6 @@ export default function MetricsNavBar() {
       border: "1px solid var(--color-border-secondary)",
       boxShadow: "0 8px 32px rgba(0,0,0,0.08)",
       position: "relative",
-      overflow: "hidden",
     }}>
       {/* Background decoration for modern feel */}
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 1, background: "linear-gradient(90deg, transparent, var(--color-border-secondary), transparent)", opacity: 0.5 }} />
@@ -146,42 +144,52 @@ export default function MetricsNavBar() {
         <Divider />
 
         <Section label="Source">
-          <div style={{ display: "flex", background: "var(--color-background-primary)", borderRadius: 12, padding: 2, gap: 1 }}>
-            {SOURCE_OPTIONS.map(opt => (
-              <Pill key={opt.id} accent active={sourceFilter.includes(opt.id)} onClick={() => toggleSource(opt.id)} style={sourceFilter.includes(opt.id) ? activePillStyle : pillStyle}>{opt.label}</Pill>
-            ))}
-          </div>
+          <AnimatedDropdown
+            items={SOURCE_OPTIONS.map(o => ({ id: o.id, label: o.label }))}
+            text="Source"
+            selected={sourceFilter}
+            onSelect={toggleSource}
+            multiSelect
+          />
         </Section>
 
         <Divider />
 
         <Section label="Modo">
-          <div style={{ display: "flex", background: "var(--color-background-primary)", borderRadius: 12, padding: 2 }}>
-            {[{ k: "performance", l: "Perf" }, { k: "criacao", l: "Cria" }].map(opt => (
-              <Pill key={opt.k} active={viewMode === opt.k} onClick={() => setViewMode(opt.k)} style={viewMode === opt.k ? activePillStyle : pillStyle}>{opt.l}</Pill>
-            ))}
-          </div>
+          <AnimatedDropdown
+            items={[{ id: 'performance', label: 'Performance' }, { id: 'criacao', label: 'Criação' }]}
+            text="Modo"
+            selected={viewMode}
+            onSelect={setViewMode}
+          />
         </Section>
 
         <Divider />
 
-        <Section label="Funil" style={{ flex: 1, minWidth: 200 }}>
-          <div style={{ display: "flex", background: "var(--color-background-primary)", borderRadius: 12, padding: 2, gap: 1, flexWrap: "wrap" }}>
-            <Pill accent active={allSelected} onClick={() => setSelectedFunnels(ALL_FUNNELS)} style={allSelected ? activePillStyle : pillStyle}>Todos</Pill>
-            {FUNNELS.map(f => (
-              <Pill key={f.key} accent active={selectedFunnels.includes(f.key)} onClick={() => toggleFunnel(f.key)} style={selectedFunnels.includes(f.key) ? activePillStyle : pillStyle}>{f.label}</Pill>
-            ))}
-          </div>
+        <Section label="Funil">
+          <AnimatedDropdown
+            items={[{ id: '_todos', label: 'Todos' }, ...FUNNELS.map(f => ({ id: f.key, label: f.label }))]}
+            text="Funil"
+            selected={selectedFunnels.length === ALL_FUNNELS.length ? ['_todos'] : selectedFunnels}
+            onSelect={(id) => {
+              if (id === '_todos') return setSelectedFunnels([...ALL_FUNNELS]);
+              // When all selected, clicking one = select only that one (same as Source)
+              if (selectedFunnels.length === ALL_FUNNELS.length) return setSelectedFunnels([id]);
+              toggleFunnel(id);
+            }}
+            multiSelect
+          />
         </Section>
 
         <Divider />
 
         <Section label="Granularidade">
-          <div style={{ display: "flex", background: "var(--color-background-primary)", borderRadius: 12, padding: 2 }}>
-            {[{ k: "single", l: "1 Mês" }, { k: "multi", l: "Multi" }, { k: "semanas", l: "Sem." }].map(m => (
-              <Pill key={m.k} active={mode === m.k} onClick={() => setMode(m.k)} style={mode === m.k ? activePillStyle : pillStyle}>{m.l}</Pill>
-            ))}
-          </div>
+          <AnimatedDropdown
+            items={[{ id: 'single', label: '1 Mês' }, { id: 'multi', label: 'Multi' }, { id: 'semanas', label: 'Sem.' }]}
+            text="Granularidade"
+            selected={mode}
+            onSelect={setMode}
+          />
         </Section>
 
         <div style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 2, marginLeft: "auto" }}>
