@@ -88,6 +88,7 @@ export default function PerformanceADSView({
             comparisonMode={comparisonMode}
             sourceFilter={sourceFilter}
             loading={campaignData.loading}
+            error={campaignData.error}
             degradedCount={campaignData.degradedCount}
             expandedCampaigns={campaignData.expandedCampaigns}
             expandedAdSets={campaignData.expandedAdSets}

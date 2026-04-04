@@ -3,7 +3,8 @@ import { classifyLead } from '../classificationService';
 import { cachedQuery } from '@/services/queryCache';
 import { buildDateRange } from '@/utils/marketingCalcs';
 import { getSourceGroup } from '@/config/sourceMapping';
-import { STAGE_IDS, PIPELINE_FUNNELS } from '@/config/pipedrive';
+import { STAGE_IDS, PIPELINE_FUNNELS, CUSTOM_FIELDS } from '@/config/pipedrive';
+import { JSONB_FIELDS } from '@/config/queryColumns';
 
 /**
  * Marketing Service — KPIs ADS (Epic 3)
@@ -58,7 +59,7 @@ export async function fetchKPIsADS(sourceFilter, years, months, funnels) {
     // Parallel fetch — NFR22: colunas explícitas
     const [metaCosts, googleCosts, metaActions, leads, deals] = await Promise.all([
       fetchMeta
-        ? fetchAll('meta_ads_costs', 'spend, impressions, reach, frequency, date_start, campaign_id, adset_id, ad_id', adsDateFilter)
+        ? fetchAll('meta_ads_costs', 'spend, impressions, date_start', adsDateFilter)
         : { data: [] },
       fetchGoogle
         ? fetchAll('google_ads_costs', 'spend, impressions, clicks, conversions, date, campaign_id', googleAdsDateFilter)
@@ -67,7 +68,7 @@ export async function fetchKPIsADS(sourceFilter, years, months, funnels) {
         ? fetchAll('meta_ads_actions', 'action_type, value, date_start, campaign_id, adset_id, ad_id', adsDateFilter)
         : { data: [] },
       fetchAll('yayforms_responses', 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market, utm_source, utm_campaign, utm_medium, utm_content', leadsDateFilter),
-      fetchAll('crm_deals', 'deal_created_at, stage_id, pipeline_id, custom_fields, status, value, person_email, won_time, deal_id, utm_source, utm_campaign, utm_medium, utm_content', dealsDateFilter),
+      fetchAll('crm_deals', `deal_created_at, stage_id, pipeline_id, status, value, person_email, won_time, deal_id, ${JSONB_FIELDS.SQL_FLAG}`, dealsDateFilter),
     ]);
 
     // Verificar erros de fetch — não cachear dados parciais
@@ -157,34 +158,36 @@ function processKPIsADS(metaCosts, googleCosts, metaActions, leads, deals, sourc
   }
 
   // ── 5. Deals — cumulative stage counting (Bowtie V2 pattern) ──
+  // Atribuição via email JOIN: crm_deals não tem utm_source, usar lead_email→utm_source
+  const emailSourceMap = {};
+  for (const l of leads) {
+    if (l.lead_email) {
+      emailSourceMap[l.lead_email.trim().toLowerCase()] = getSourceGroup(l.utm_source);
+    }
+  }
+
   for (const d of deals) {
     if (d.status === 'deleted') continue;
-    const source = getSourceGroup(d.utm_source);
+    const dealEmail = d.person_email?.trim().toLowerCase();
+    const source = emailSourceMap[dealEmail] || 'S/Track';
     const bucket = ensureBucket(toMonth(d.deal_created_at), source);
     if (!bucket) continue;
 
+    // SQL: cf_sql_flag check (AD-V2-9 pattern — alinhado V1/V2)
+    const isSQL = (d.cf_sql_flag ?? null) == CUSTOM_FIELDS.SQL_FLAG.values.SIM;
+    if (isSQL) bucket.sqls += 1;
+
+    // Reunião/Proposta/Venda: stage_id cumulative (Bowtie pattern)
     const isVenda = d.status === 'won';
     const inProposta = STAGE_IDS.PROPOSTA.includes(d.stage_id) || STAGE_IDS.CONTRATO_ENVIADO.includes(d.stage_id);
     const inReuniao = STAGE_IDS.REUNIAO_AGENDADA.includes(d.stage_id);
-    const inSql = STAGE_IDS.SQL.includes(d.stage_id);
 
-    // Cumulative: higher funnel stages count in all lower stages
     if (isVenda) {
       bucket.sales += 1;
       bucket.revenue += Number(d.value || 0);
-      bucket.propostas += 1;
-      bucket.reunioes += 1;
-      bucket.sqls += 1;
-    } else if (inProposta) {
-      bucket.propostas += 1;
-      bucket.reunioes += 1;
-      bucket.sqls += 1;
-    } else if (inReuniao) {
-      bucket.reunioes += 1;
-      bucket.sqls += 1;
-    } else if (inSql) {
-      bucket.sqls += 1;
     }
+    if (inReuniao || inProposta || isVenda) bucket.reunioes += 1;
+    if (inProposta || isVenda) bucket.propostas += 1;
   }
 
   // ── 6. Aggregate bySource totals ──

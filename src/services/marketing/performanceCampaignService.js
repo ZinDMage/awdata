@@ -10,9 +10,14 @@ import { CUSTOM_FIELDS } from '@/config/pipedrive'
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+const isDev = import.meta.env.DEV
+/** Log sanitizado — detalhes internos só em dev */
+const logError = (prefix, err) => isDev ? console.error(prefix, err) : console.error(prefix)
+
 // FR113, AC1: colunas exatas para atribuição (pattern kpisAdsService)
 const LEADS_COLUMNS = 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market, utm_source, utm_campaign, utm_medium, utm_content'
-const DEALS_COLUMNS = `deal_created_at, stage_id, pipeline_id, status, value, person_email, won_time, deal_id, utm_source, utm_campaign, utm_medium, utm_content, ${JSONB_FIELDS.SQL_FLAG}`
+// crm_deals não tem colunas utm_* — atribuição via email→lead fallback (linhas 83-89)
+const DEALS_COLUMNS = `deal_created_at, stage_id, pipeline_id, status, value, person_email, won_time, deal_id, ${JSONB_FIELDS.SQL_FLAG}`
 
 /** @param {string[]|null} sf */
 const isNoFilter = (sf) => !sf || sf.length === 0 || sf.includes('todos')
@@ -76,20 +81,12 @@ function buildAttributionMap(leads, deals, sourceFilter) {
   }
 
   // AC4: Deals → SQL + Vendas por campanha
+  // Atribuição via email JOIN — crm_deals não tem campos UTM
   for (const deal of deals) {
-    let utmSource = deal.utm_source
-    let utmCampaign = deal.utm_campaign
-    // Fallback via email→lead (performanceOverviewService:207-217)
-    if (!utmSource || !utmCampaign) {
-      const email = deal.person_email ? deal.person_email.toLowerCase().trim() : null
-      if (email) {
-        const lead = leadsByEmail.get(email)
-        if (lead) {
-          utmSource = utmSource || lead.utm_source
-          utmCampaign = utmCampaign || lead.utm_campaign
-        }
-      }
-    }
+    const email = deal.person_email ? deal.person_email.toLowerCase().trim() : null
+    const lead = email ? leadsByEmail.get(email) : null
+    const utmSource = lead?.utm_source || null
+    const utmCampaign = lead?.utm_campaign || null
     if (!isSourceIncluded(utmSource, sourceFilter)) continue
     const group = getSourceGroup(utmSource)
     const parsed = group === 'Meta'
@@ -99,8 +96,8 @@ function buildAttributionMap(leads, deals, sourceFilter) {
         : null
     if (!parsed) { if (group === 'Meta' || group === 'Google') failedCount++; continue } // FR129: só conta falha de parsing real
     const attr = getAttr(String(parsed.id))
-    // SQL: custom field check (AD-V2-9 pattern) — == não === (strings do Supabase)
-    if ((deal.cf_sql_flag ?? null) == CUSTOM_FIELDS.SQL_FLAG.values.SIM) {
+    // SQL: custom field check (AD-V2-9 pattern) — ambos são strings via JSONB ->> extraction
+    if (String(deal.cf_sql_flag ?? '') === CUSTOM_FIELDS.SQL_FLAG.values.SIM) {
       attr.sql++
     }
     // Vendas: won deals
@@ -140,6 +137,7 @@ export async function fetchPerformanceByCampaign(sourceFilter, years, months, pa
     // AC1: Fetch leads+deals cacheado separadamente (1x, reutilizado entre páginas)
     let leadsData = []
     let dealsData = []
+    let attrFetchFailed = false
     try {
       const attrData = await cachedQuery(attrKey, async () => {
         const leadsDateFilter = [
@@ -162,7 +160,9 @@ export async function fetchPerformanceByCampaign(sourceFilter, years, months, pa
       dealsData = attrData.deals
     } catch (attrErr) {
       // AC6/FR129: continue with zero attribution — don't crash
-      console.error('[performanceCampaignService] attribution fetch failed:', attrErr)
+      // Sinalizar que atribuição falhou (não é zero genuíno)
+      attrFetchFailed = true
+      logError('[performanceCampaignService] attribution fetch failed', attrErr)
     }
 
     // AC3/AC4: Build attribution map (MQL, SQL, Vendas, Receita por campaign_id)
@@ -187,8 +187,8 @@ export async function fetchPerformanceByCampaign(sourceFilter, years, months, pa
     const campaigns = rpcResult.rawCampaigns.map(c => {
       const id = String(c.campaign_id)
       const attr = attrMap.get(id) || (c.campaign_name && attrMap.get(c.campaign_name)) || { mql: 0, sql: 0, vendas: 0, receita: 0 }
-      // FR129: distinguir zero genuíno de zero por parsing falho
-      const isDegraded = failedCount > 0 && attr.mql === 0 && attr.sql === 0
+      // FR129: distinguir zero genuíno de zero por falha (parsing ou fetch)
+      const isDegraded = (attrFetchFailed || failedCount > 0) && attr.mql === 0 && attr.sql === 0
       return {
         ...c,
         mql: isDegraded ? null : attr.mql,
@@ -203,7 +203,7 @@ export async function fetchPerformanceByCampaign(sourceFilter, years, months, pa
 
     return { campaigns, total: rpcResult.total, page, degradedCount }
   } catch (err) {
-    console.error('[performanceCampaignService] rpc_ads_by_campaign failed:', err)
+    logError('[performanceCampaignService] rpc_ads_by_campaign failed', err)
     return { campaigns: [], total: 0, page, degradedCount: 0, error: err.message || String(err) }
   }
 }
@@ -233,19 +233,24 @@ async function fetchAttributionData(sf, years, months) {
       return { leads: leads.data || [], deals: deals.data || [] }
     }, 5 * 60 * 1000)
   } catch (err) {
-    console.error('[performanceCampaignService] attribution data failed:', err)
-    return { leads: [], deals: [] }
+    logError('[performanceCampaignService] attribution data failed', err)
+    return { leads: [], deals: [], error: err.message || String(err) }
   }
 }
 
 /**
- * Builds per-entity attribution by matching UTM field → entity ID.
+ * Builds attribution Map for ALL entities in a single pass — O(L+D) instead of O(N*(L+D)).
+ * Returns Map<entityId, { mql, sql, vendas, receita }>.
  * Used for AdSet (utm_medium) and Ad (utm_content) levels. // FR127, FR129
  */
-function buildSubAttribution(leads, deals, sourceFilter, utmField, entityId) {
-  const attr = { mql: 0, sql: 0, vendas: 0, receita: 0 }
-  const eid = String(entityId)
+function buildSubAttributionMap(leads, deals, sourceFilter, utmField) {
+  const attrMap = new Map()
+  const getAttr = (id) => {
+    if (!attrMap.has(id)) attrMap.set(id, { mql: 0, sql: 0, vendas: 0, receita: 0 })
+    return attrMap.get(id)
+  }
 
+  // Build email→lead lookup once
   const leadsByEmail = new Map()
   for (const lead of leads) {
     if (!lead.lead_email) continue
@@ -256,54 +261,50 @@ function buildSubAttribution(leads, deals, sourceFilter, utmField, entityId) {
     }
   }
 
-  // Leads → MQL
+  // Single pass: Leads → MQL by entityId
   for (const lead of leads) {
     if (!isSourceIncluded(lead.utm_source, sourceFilter)) continue
     const group = getSourceGroup(lead.utm_source)
     const parsed = group === 'Meta' ? parseMetaUTM(lead[utmField])
       : group === 'Google' ? parseGoogleUTM(lead[utmField])
       : null
-    if (!parsed || String(parsed.id) !== eid) continue
+    if (!parsed) continue
     if (classifyLead(lead.lead_revenue_range, lead.lead_monthly_volume,
                      lead.lead_segment, lead.lead_market) === 'MQL') {
-      attr.mql++
+      getAttr(String(parsed.id)).mql++
     }
   }
 
-  // Deals → SQL + Vendas
+  // Single pass: Deals → SQL + Vendas by entityId
+  // Atribuição via email JOIN — crm_deals não tem campos UTM
   for (const deal of deals) {
-    let utmSource = deal.utm_source
-    let utmValue = deal[utmField]
-    if (!utmSource || !utmValue) {
-      const email = deal.person_email ? deal.person_email.toLowerCase().trim() : null
-      if (email) {
-        const lead = leadsByEmail.get(email)
-        if (lead) {
-          utmSource = utmSource || lead.utm_source
-          utmValue = utmValue || lead[utmField]
-        }
-      }
-    }
+    const email = deal.person_email ? deal.person_email.toLowerCase().trim() : null
+    const lead = email ? leadsByEmail.get(email) : null
+    const utmSource = lead?.utm_source || null
+    const utmValue = lead?.[utmField] || null
     if (!isSourceIncluded(utmSource, sourceFilter)) continue
     const group = getSourceGroup(utmSource)
     const parsed = group === 'Meta' ? parseMetaUTM(utmValue)
       : group === 'Google' ? parseGoogleUTM(utmValue)
       : null
-    if (!parsed || String(parsed.id) !== eid) continue
-    if ((deal.cf_sql_flag ?? null) == CUSTOM_FIELDS.SQL_FLAG.values.SIM) attr.sql++
+    if (!parsed) continue
+    const attr = getAttr(String(parsed.id))
+    if (String(deal.cf_sql_flag ?? '') === CUSTOM_FIELDS.SQL_FLAG.values.SIM) attr.sql++
     if (deal.status === 'won') {
       attr.vendas++
       attr.receita += Number(deal.value) || 0
     }
   }
 
-  return attr
+  return attrMap
 }
 
 /** Merges attribution into an array of entities, adding mql/sql/custoMQL/custoSQL */
 function mergeAttribution(entities, leads, deals, sf, utmField, idField) {
+  const attrMap = buildSubAttributionMap(leads, deals, sf, utmField)
+  const empty = { mql: 0, sql: 0, vendas: 0, receita: 0 }
   return entities.map(e => {
-    const attr = buildSubAttribution(leads, deals, sf, utmField, e[idField])
+    const attr = attrMap.get(String(e[idField])) || empty
     return {
       ...e,
       mql: attr.mql,
@@ -453,7 +454,7 @@ export async function fetchAdSetsByCampaign(campaignId, source, sourceFilter, ye
       loading: false,
     }
   } catch (err) {
-    console.error('[performanceCampaignService] fetchAdSetsByCampaign failed:', err)
+    logError('[performanceCampaignService] fetchAdSetsByCampaign failed', err)
     return { adsets: [], loading: false, error: err.message || String(err) }
   }
 }
@@ -558,7 +559,7 @@ export async function fetchAdsByAdSet(campaignId, adsetId, source, sourceFilter,
       loading: false,
     }
   } catch (err) {
-    console.error('[performanceCampaignService] fetchAdsByAdSet failed:', err)
+    logError('[performanceCampaignService] fetchAdsByAdSet failed', err)
     return { ads: [], loading: false, error: err.message || String(err) }
   }
 }

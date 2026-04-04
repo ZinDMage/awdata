@@ -27,7 +27,7 @@ const PERFORMANCE_TABS = [
 // AD-V3-6: MarketingView é o ÚNICO consumidor do MarketingContext
 // D2: MarketingProvider lifted to Dashboard — this component consumes context directly
 // FR92, FR93
-export default function MarketingView() {
+export default function MarketingView({ dk }) {
   const {
     activeSubView,
     analysisMode,
@@ -105,6 +105,7 @@ export default function MarketingView() {
               data={kpisData.data}
               loading={kpisData.loading}
               error={kpisData.error}
+              dk={dk}
             />
           )}
           {activeSubView === 'marketing-performance' && (

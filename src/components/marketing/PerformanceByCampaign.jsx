@@ -107,6 +107,7 @@ export default function PerformanceByCampaign({
   comparisonMode,
   sourceFilter,
   loading,
+  error, // S5: erro de RPC/rede para exibir ao usuário
   degradedCount, // FR129: campanhas com atribuição UTM falha
   expandedCampaigns,
   expandedAdSets,
@@ -117,6 +118,19 @@ export default function PerformanceByCampaign({
 
   // AC5: Loading state — initial load only (no campaigns yet)
   if (loading && !campaigns?.length) return <div className="animate-pulse h-64 bg-surface-secondary/50 rounded-xl" />
+
+  // S5: Error state — falha de RPC/rede exibida ao usuário
+  if (error && !campaigns?.length) {
+    return (
+      <div className="bg-surface-secondary rounded-2xl border border-border-subtle/20 p-6">
+        <div role="alert" className="px-4 py-3 rounded-lg bg-red-500/15 border border-red-500/30 flex items-start gap-2">
+          <span className="text-sm text-red-400 leading-relaxed">
+            Erro ao carregar campanhas — verifique sua conexão e tente novamente
+          </span>
+        </div>
+      </div>
+    )
+  }
 
   // AC5: Empty state
   if (!campaigns?.length) {

@@ -54,13 +54,13 @@ export async function fetchPerformanceOverview(sourceFilter, years, months) {
     const [metaCosts, googleCosts, metaActions, leads, deals] = await Promise.all([
       includesMeta
         ? fetchAll('meta_ads_costs',
-            'spend,impressions,reach,campaign_id,campaign_name,ad_id,ad_name,date_start',
+            'spend,impressions,date_start',
             [{ op: 'gte', field: 'date_start', value: startDate },
              { op: 'lte', field: 'date_start', value: endDate }])
         : { data: [] },
       includesGoogle
         ? fetchAll('google_ads_costs',
-            'spend,impressions,clicks,campaign_id,campaign_name,ad_id,ad_name,date',
+            'spend,impressions,clicks,conversions,date',
             [{ op: 'gte', field: 'date', value: startDate },
              { op: 'lte', field: 'date', value: endDate }])
         : { data: [] },
@@ -76,7 +76,7 @@ export async function fetchPerformanceOverview(sourceFilter, years, months) {
         [{ op: 'gte', field: 'submitted_at', value: startDate },
          { op: 'lte', field: 'submitted_at', value: endDate }]),
       fetchAll('crm_deals',
-        `deal_created_at,stage_id,pipeline_id,status,value,person_email,won_time,deal_id,utm_source,utm_campaign,utm_medium,utm_content,${JSONB_FIELDS.SQL_FLAG}`,
+        `deal_created_at,stage_id,pipeline_id,status,value,person_email,won_time,deal_id,${JSONB_FIELDS.SQL_FLAG}`,
         [{ op: 'gte', field: 'deal_created_at', value: startDate },
          { op: 'lte', field: 'deal_created_at', value: endDate }]),
     ])
@@ -198,22 +198,12 @@ export async function fetchPerformanceOverview(sourceFilter, years, months) {
     let receita = 0
 
     for (const deal of dealsData) {
-      // UTM do deal direto, fallback p/ lead via email (FR113)
-      let utmSource = deal.utm_source
-      let utmCampaign = deal.utm_campaign
-      let utmContent = deal.utm_content
-
-      if (!utmSource || !utmCampaign || !utmContent) {
-        const email = deal.person_email ? deal.person_email.toLowerCase().trim() : null
-        if (email) {
-          const lead = leadsByEmail.get(email)
-          if (lead) {
-            utmSource = utmSource || lead.utm_source
-            utmCampaign = utmCampaign || lead.utm_campaign
-            utmContent = utmContent || lead.utm_content
-          }
-        }
-      }
+      // Atribuição via email JOIN — crm_deals não tem campos UTM
+      const email = deal.person_email ? deal.person_email.toLowerCase().trim() : null
+      const lead = email ? leadsByEmail.get(email) : null
+      const utmSource = lead?.utm_source || null
+      const utmCampaign = lead?.utm_campaign || null
+      const utmContent = lead?.utm_content || null
 
       if (!isSourceIncluded(utmSource, sourceFilter)) continue
 

@@ -162,7 +162,7 @@ export default function Dashboard({ session }) {
 
             {currentView === "marketing" && (
               <Suspense fallback={<SkeletonLoader />}>
-                <MarketingView />
+                <MarketingView dk={dk} />
               </Suspense>
             )}
 
