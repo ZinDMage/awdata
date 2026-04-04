@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchStageDeals } from '@/services/gerencialService';
 import { STAGE_TABS } from '@/config/pipedrive';
 
-export default function useTabData(activeTab, selectedFunnel) {
+export default function useTabData(activeTab, selectedFunnel, sourceFilter) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isRefetching, setIsRefetching] = useState(false);
@@ -10,6 +10,7 @@ export default function useTabData(activeTab, selectedFunnel) {
   const dataRef = useRef(data);
   dataRef.current = data;
   const versionRef = useRef(0);
+  const sourceKey = JSON.stringify(sourceFilter); // FR89: stabilize array ref
 
   const fetchData = useCallback(async () => {
     const tab = STAGE_TABS[activeTab];
@@ -26,7 +27,7 @@ export default function useTabData(activeTab, selectedFunnel) {
     if (isFirstLoad) setLoading(true);
     else setIsRefetching(true);
     try {
-      const result = await fetchStageDeals(tab.stageIds, selectedFunnel, activeTab);
+      const result = await fetchStageDeals(tab.stageIds, selectedFunnel, activeTab, sourceFilter);
       if (version !== versionRef.current) return;
       setData(result);
     } catch (err) {
@@ -39,7 +40,7 @@ export default function useTabData(activeTab, selectedFunnel) {
         setIsRefetching(false);
       }
     }
-  }, [activeTab, selectedFunnel]);
+  }, [activeTab, selectedFunnel, sourceKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchData(); }, [fetchData]);
 

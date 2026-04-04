@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useMemo } from 'react';
+import { useMetrics } from '@/contexts/MetricsContext'; // FR89: source filter propagation
 import usePillCounts from '@/hooks/usePillCounts';
 import useBowtieData from '@/hooks/useBowtieData';
 import useTabData from '@/hooks/useTabData';
@@ -14,6 +15,9 @@ function getCurrentMonth() {
 const GerencialContext = createContext(null);
 
 export function GerencialProvider({ children }) {
+  // ── Source filter from MetricsContext (FR89) ──
+  const { sourceFilter } = useMetrics();
+
   // ── State ──
   const [activeTab, setActiveTab] = useState('bowtie');
   const [selectedFunnel, setSelectedFunnel] = useState('todos');
@@ -23,9 +27,9 @@ export function GerencialProvider({ children }) {
   });
 
   // ── Hooks (stale-while-revalidate) ──
-  const pillCounts = usePillCounts(selectedFunnel);
-  const bowtieData = useBowtieData(bowtiePeriod, selectedFunnel);
-  const tabData = useTabData(activeTab, selectedFunnel);
+  const pillCounts = usePillCounts(selectedFunnel, sourceFilter);
+  const bowtieData = useBowtieData(bowtiePeriod, selectedFunnel, sourceFilter);
+  const tabData = useTabData(activeTab, selectedFunnel, sourceFilter);
   const dealModal = useDealModal();
 
   // ── Memoize hook results to stabilize context value ──
@@ -40,6 +44,7 @@ export function GerencialProvider({ children }) {
     activeTab,
     selectedFunnel,
     bowtiePeriod,
+    sourceFilter, // FR89: exposed for components that need it
 
     // Setters
     setActiveTab,
@@ -51,7 +56,7 @@ export function GerencialProvider({ children }) {
     bowtieData: stableBowtieData,
     tabData: stableTabData,
     dealModal: stableDealModal,
-  }), [activeTab, selectedFunnel, bowtiePeriod, stablePillCounts, stableBowtieData, stableTabData, stableDealModal]);
+  }), [activeTab, selectedFunnel, bowtiePeriod, sourceFilter, stablePillCounts, stableBowtieData, stableTabData, stableDealModal]);
 
   return (
     <GerencialContext.Provider value={value}>

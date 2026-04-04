@@ -8,7 +8,7 @@ import MetricsTable from './MetricsTable';
 import LossCharts from './LossCharts';
 
 export default function MetricsView({ dk }) {
-  const { rawData, viewMode, selectedFunnels, ALL_FUNNELS, mode, sM, mM, wM, sW, year, MESES, SEMANAS } = useMetrics();
+  const { rawData, viewMode, selectedFunnels, ALL_FUNNELS, mode, sM, mM, wM, sW, year, years, MESES, SEMANAS } = useMetrics();
 
   const data = useMemo(() => {
     if (!rawData) return null;
@@ -21,23 +21,44 @@ export default function MetricsView({ dk }) {
     return mergeFunnelData(datasets);
   }, [rawData, selectedFunnels, viewMode, ALL_FUNNELS]);
 
+  const isMultiYear = years.length > 1;
   const colKeys = useMemo(() => {
-    if (mode === "single") return [`${year}-${sM}`];
+    if (mode === "single") return [sM.includes('-') ? sM : `${year}-${sM}`];
     if (mode === "semanas") return SEMANAS.filter(s => sW.includes(s.key)).map(s => s.key);
-    return [...mM].sort((a, b) => MESES.findIndex(m => m.key === a) - MESES.findIndex(m => m.key === b)).map(m => `${year}-${m}`);
+    // Normalize: ensure all keys are composite "year-month" format
+    const normalized = mM.map(m => m.includes('-') ? m : `${year}-${m}`);
+    // Sort chronologically: by year first, then by month index
+    return [...normalized].sort((a, b) => {
+      const [yA, mA] = a.split('-');
+      const [yB, mB] = b.split('-');
+      if (yA !== yB) return yA.localeCompare(yB);
+      return MESES.findIndex(m => m.key === mA) - MESES.findIndex(m => m.key === mB);
+    });
   }, [mode, sM, mM, sW, year, MESES, SEMANAS]);
 
-  const colLabels = useMemo(() =>
-    mode === "semanas" ? SEMANAS.filter(s => sW.includes(s.key)).map(s => s.label) : colKeys.map(k => MESES.find(m => m.key === (k.includes("-") ? k.split("-")[1] : k))?.label),
-  [mode, colKeys, sW, MESES, SEMANAS]);
+  const colLabels = useMemo(() => {
+    if (mode === "semanas") return SEMANAS.filter(s => sW.includes(s.key)).map(s => s.label);
+    return colKeys.map(k => {
+      // colKeys are always "year-month" format after normalization
+      const [yr, monthKey] = k.split('-');
+      const monthLabel = MESES.find(m => m.key === monthKey)?.label || monthKey;
+      return isMultiYear ? monthLabel + '/' + yr.slice(-2) : monthLabel;
+    });
+  }, [mode, colKeys, sW, MESES, SEMANAS, isMultiYear]);
 
-  const aggKeys = useMemo(() => mode === "semanas" ? [`${year}-${wM}`] : colKeys, [mode, colKeys, wM, year]);
+  const aggKeys = useMemo(() => {
+    if (mode === "semanas") {
+      // wM may be composite "2026-abr" in multi-year or plain "abr" in single-year
+      return [wM.includes('-') ? wM : `${year}-${wM}`];
+    }
+    return colKeys;
+  }, [mode, colKeys, wM, year]);
   const aggData = useMemo(() => agr(aggKeys, data), [aggKeys, data]);
 
   const getCV = useCallback((ck, pt) => {
     if (!data) return null;
     if (mode === "semanas") {
-      const curM = `${year}-${wM}`;
+      const curM = wM.includes('-') ? wM : `${year}-${wM}`;
       return res(data[curM]?.wk?.[ck], pt);
     }
     return res(data[ck], pt);
@@ -51,7 +72,7 @@ export default function MetricsView({ dk }) {
       prevAgg = agr(prevKeys, data);
       compLabel = prevPeriodLabel(prevKeys, mode);
     } else {
-      const lastK = mode === "single" ? `${year}-${sM}` : `${year}-${wM}`;
+      const lastK = mode === "single" ? (sM.includes('-') ? sM : `${year}-${sM}`) : (wM.includes('-') ? wM : `${year}-${wM}`);
       const pm = prevM(lastK, year);
       curAgg = data ? data[lastK] : null;
       prevAgg = (data && pm) ? data[pm] : null;
