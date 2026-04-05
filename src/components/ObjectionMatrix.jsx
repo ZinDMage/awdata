@@ -9,6 +9,14 @@ const STAGE_COLUMNS = [
   { key: 'contrato', label: 'Contrato Enviado', icon: '📄', stageIds: new Set(STAGE_IDS.CONTRATO_ENVIADO) },
 ];
 
+/** Status filter options */
+const STATUS_OPTIONS = [
+  { key: 'todos', label: 'Todos' },
+  { key: 'open', label: 'Aberto' },
+  { key: 'won', label: 'Ganho' },
+  { key: 'lost', label: 'Perda' },
+];
+
 /** Generate month options for the last 24 months */
 function generateMonthOptions() {
   const opts = [];
@@ -52,12 +60,14 @@ function parseObjections(raw) {
 /**
  * ObjectionMatrix — Matriz de objeções pós-call (objeção × etapa)
  * Rows: objection values, Columns: proposta sub-stages, Cells: deal count
+ * Supports status filter (open/won/lost/todos)
  */
 export default function ObjectionMatrix({ deals }) {
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const [startMonth, setStartMonth] = useState('2026-01');
   const [endMonth, setEndMonth] = useState(currentMonth);
+  const [statusFilter, setStatusFilter] = useState('todos');
 
   const handleStartChange = (v) => {
     if (v > endMonth) { setStartMonth(v); setEndMonth(v); }
@@ -70,8 +80,12 @@ export default function ObjectionMatrix({ deals }) {
 
   const filteredDeals = useMemo(() => {
     if (!deals?.length) return [];
-    return deals.filter(d => isInPeriod(d, startMonth, endMonth));
-  }, [deals, startMonth, endMonth]);
+    return deals.filter(d => {
+      if (!isInPeriod(d, startMonth, endMonth)) return false;
+      if (statusFilter !== 'todos' && d.status !== statusFilter) return false;
+      return true;
+    });
+  }, [deals, startMonth, endMonth, statusFilter]);
 
   const periodLabel = useMemo(() => {
     const fmt = (ym) => {
@@ -82,6 +96,8 @@ export default function ObjectionMatrix({ deals }) {
     if (startMonth === endMonth) return fmt(startMonth);
     return `${fmt(startMonth)} — ${fmt(endMonth)}`;
   }, [startMonth, endMonth]);
+
+  const statusLabel = STATUS_OPTIONS.find(o => o.key === statusFilter)?.label ?? '';
 
   const { objections, matrix, stageTotals, grandTotal } = useMemo(() => {
     if (!filteredDeals.length) return { objections: [], matrix: {}, stageTotals: {}, grandTotal: 0 };
@@ -117,42 +133,65 @@ export default function ObjectionMatrix({ deals }) {
 
   return (
     <div className="bg-surface-secondary rounded-card border border-border-subtle/20 overflow-hidden">
-      {/* Header with period filter */}
-      <div className="px-6 py-4 border-b border-border-subtle/20 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-content-primary">Matriz de Objeção — Pós Call</h3>
-          <p className="text-xs text-content-tertiary mt-0.5">
-            {grandTotal} objeções registradas · {periodLabel}
-          </p>
+      {/* Header with period + status filters */}
+      <div className="px-6 py-4 border-b border-border-subtle/20 flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-content-primary">Matriz de Objeção — Pós Call</h3>
+            <p className="text-xs text-content-tertiary mt-0.5">
+              {grandTotal} objeções registradas · {periodLabel}{statusFilter !== 'todos' ? ` · ${statusLabel}` : ''}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-content-tertiary">Início:</label>
+            <select
+              value={startMonth}
+              onChange={(e) => handleStartChange(e.target.value)}
+              className="bg-surface-tertiary rounded-lg px-3 py-1.5 text-sm text-content-primary border border-border-subtle/20 outline-none focus:ring-2 focus:ring-info"
+            >
+              {MONTH_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <label className="text-xs text-content-tertiary">Fim:</label>
+            <select
+              value={endMonth}
+              onChange={(e) => handleEndChange(e.target.value)}
+              className="bg-surface-tertiary rounded-lg px-3 py-1.5 text-sm text-content-primary border border-border-subtle/20 outline-none focus:ring-2 focus:ring-info"
+            >
+              {MONTH_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <label className="text-xs text-content-tertiary">Início:</label>
-          <select
-            value={startMonth}
-            onChange={(e) => handleStartChange(e.target.value)}
-            className="bg-surface-tertiary rounded-lg px-3 py-1.5 text-sm text-content-primary border border-border-subtle/20 outline-none focus:ring-2 focus:ring-info"
-          >
-            {MONTH_OPTIONS.map(opt => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
-          <label className="text-xs text-content-tertiary">Fim:</label>
-          <select
-            value={endMonth}
-            onChange={(e) => handleEndChange(e.target.value)}
-            className="bg-surface-tertiary rounded-lg px-3 py-1.5 text-sm text-content-primary border border-border-subtle/20 outline-none focus:ring-2 focus:ring-info"
-          >
-            {MONTH_OPTIONS.map(opt => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
+
+        {/* Status filter pills */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-content-tertiary mr-1">Status:</span>
+          {STATUS_OPTIONS.map(opt => {
+            const active = statusFilter === opt.key;
+            return (
+              <button
+                key={opt.key}
+                onClick={() => setStatusFilter(opt.key)}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                  active
+                    ? 'bg-info/20 text-info ring-1 ring-info/30'
+                    : 'bg-surface-tertiary text-content-tertiary hover:text-content-secondary hover:bg-white/[0.06]'
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
       {/* Matrix table or empty state */}
       {grandTotal === 0 ? (
         <div className="px-6 py-8 text-center">
-          <p className="text-content-tertiary text-sm">Nenhuma objeção registrada no período</p>
+          <p className="text-content-tertiary text-sm">Nenhuma objeção registrada no período{statusFilter !== 'todos' ? ` com status "${statusLabel}"` : ''}</p>
         </div>
       ) : (
         <div className="overflow-x-auto">

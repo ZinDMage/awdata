@@ -3,7 +3,7 @@ import { useGerencial } from '@/contexts/GerencialContext';
 import { STAGE_TABS, STAGE_IDS, FUNNEL_LABELS, CUSTOM_FIELDS, parseCustomFields } from '@/config/pipedrive';
 import { getTabColumns } from '@/config/gerencialTabs';
 import { computeStageData } from '@/utils/stageMetrics';
-import { fetchAdSpend, fetchPropostaCycleData, fetchHistoricalConvRate, fetchMqlContext, fetchSqlContext, fetchForecastData } from '@/services/gerencialService';
+import { fetchAdSpend, fetchPropostaCycleData, fetchHistoricalConvRate, fetchMqlContext, fetchSqlContext, fetchForecastData, fetchObjectionDeals } from '@/services/gerencialService';
 import { classifyLead } from '@/services/classificationService';
 import BowtieChart from './BowtieChart';
 import ForecastPanel from './ForecastPanel';
@@ -129,7 +129,7 @@ function BowtieFilters({ bowtiePeriod, selectedFunnel, onPeriodChange, onFunnelC
 }
 
 // ── StageView com dados computados ──
-function StageViewWithData({ activeTab, deals, bowtieStages, onRowClick }) {
+function StageViewWithData({ activeTab, deals, bowtieStages, onRowClick, selectedFunnel, sourceFilter }) {
   const configKey = TAB_TO_CONFIG[activeTab] || activeTab;
   const columns = getTabColumns(configKey);
 
@@ -208,6 +208,26 @@ function StageViewWithData({ activeTab, deals, bowtieStages, onRowClick }) {
     return () => { cancelled = true; };
   }, [activeTab]);
 
+  // Proposta: fetch deals com TODOS os status para ObjectionMatrix
+  const [objectionDeals, setObjectionDeals] = useState([]);
+  useEffect(() => {
+    if (activeTab !== 'proposta') return;
+    let cancelled = false;
+    fetchObjectionDeals(selectedFunnel, sourceFilter).then(raw => {
+      if (cancelled) return;
+      // Enrich with cf_objecoes
+      const enriched = raw.map(d => {
+        const cf = parseCustomFields(d.custom_fields);
+        return { ...d, cf_objecoes: cf[CUSTOM_FIELDS.OBJECOES_POS_CONTATO.key] ?? null };
+      });
+      setObjectionDeals(enriched);
+    }).catch(err => {
+      console.error('[GerencialView] objection deals fetch error:', err);
+      if (!cancelled) setObjectionDeals([]);
+    });
+    return () => { cancelled = true; };
+  }, [activeTab, selectedFunnel, sourceFilter]);
+
   // Context cross-tab: contagens do Bowtie (Lead, MQL) para KPIs de %
   const context = useMemo(() => ({
     leadCount: bowtieStages?.[0]?.count ?? null,
@@ -244,7 +264,7 @@ function StageViewWithData({ activeTab, deals, bowtieStages, onRowClick }) {
       onRowClick={onRowClick}
       afterCharts={
         activeTab === 'perda' ? <LossMatrix deals={filteredDeals} /> :
-        activeTab === 'proposta' ? <ObjectionMatrix deals={filteredDeals} /> :
+        activeTab === 'proposta' ? <ObjectionMatrix deals={objectionDeals} /> :
         activeTab === 'resultado' ? <CycleBySegmentChart deals={filteredDeals} /> :
         undefined
       }
@@ -257,6 +277,7 @@ export default function GerencialView() {
   const {
     activeTab,
     selectedFunnel,
+    sourceFilter,
     bowtiePeriod,
     setActiveTab,
     setSelectedFunnel,
@@ -400,6 +421,8 @@ export default function GerencialView() {
                 deals={tabData.data || []}
                 bowtieStages={bowtieData.data?.stages}
                 onRowClick={openModal}
+                selectedFunnel={selectedFunnel}
+                sourceFilter={sourceFilter}
               />
             )}
           </>

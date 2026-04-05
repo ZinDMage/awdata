@@ -444,6 +444,51 @@ export async function fetchStageDeals(stageIds, funnel, tabKey, sourceFilter) {
 }
 
 /**
+ * Deals de Proposta + Contrato Enviado — TODOS os status (open/won/lost).
+ * Usado pela ObjectionMatrix para permitir filtro por status.
+ */
+export async function fetchObjectionDeals(funnel, sourceFilter) {
+  const sourceKey = JSON.stringify(sourceFilter || ['todos']);
+  return cachedQuery(`objection-deals:${funnel || 'todos'}:${sourceKey}`, async () => {
+  try {
+    const stageIds = [...STAGE_IDS.PROPOSTA, ...STAGE_IDS.CONTRATO_ENVIADO];
+    let query = supabase.from('crm_deals')
+      .select('id, title, person_name, person_email, value, stage_id, stage_name, status, pipeline_id, deal_created_at, custom_fields')
+      .in('stage_id', stageIds)
+      .gte('deal_created_at', DATA_START_DATE);
+
+    query = applyFunnelFilter(query, funnel);
+
+    const { data: deals, error } = await query;
+    if (error) throw error;
+    if (!deals?.length) return [];
+
+    // FR89: source filter via email cross-ref
+    const hasSourceFilter = sourceFilter && !sourceFilter.includes('todos');
+    let filteredDeals = deals;
+    if (hasSourceFilter) {
+      const sourceYay = await paginatedQuery(() => {
+        let q = supabase.from('yayforms_responses')
+          .select('lead_email')
+          .gte('submitted_at', DATA_START_DATE);
+        return applySourceFilter(q, sourceFilter);
+      });
+      const allowEmails = new Set(sourceYay.map(r => normalizeEmail(r.lead_email)).filter(Boolean));
+      filteredDeals = deals.filter(d => {
+        const email = d.person_email?.trim()?.toLowerCase();
+        return email && allowEmails.has(email);
+      });
+    }
+
+    return filteredDeals;
+  } catch (err) {
+    console.error('[gerencialService] fetchObjectionDeals error:', err);
+    return [];
+  }
+  }, 5 * 60 * 1000);
+}
+
+/**
  * Contagens agrupadas por aba lógica via STAGE_TABS.
  * Approach híbrido: RPC para sql/reuniao/proposta/contrato/perda/resultado,
  * MQL mantém client-side com classifyLead (AD-V2-8, Story 5.4).

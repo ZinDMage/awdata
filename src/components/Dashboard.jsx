@@ -11,6 +11,7 @@ import { MarketingProvider } from '@/contexts/MarketingContext'; // D2: provider
 
 const GerencialView = lazy(() => import('./GerencialView'));
 const MarketingView = lazy(() => import('./MarketingView')); // P3: lazy like GerencialView
+const DailyView = lazy(() => import('./DailyView'));
 
 function useDarkMode() {
   const [dk, setDk] = useState(() =>
@@ -166,7 +167,13 @@ export default function Dashboard({ session }) {
               </Suspense>
             )}
 
-            {currentView !== "metricas" && currentView !== "config" && currentView !== "gerencial" && currentView !== "marketing" && (
+            {currentView === "daily" && (
+              <Suspense fallback={<SkeletonLoader />}>
+                <DailyView />
+              </Suspense>
+            )}
+
+            {currentView !== "metricas" && currentView !== "config" && currentView !== "gerencial" && currentView !== "marketing" && currentView !== "daily" && (
               <div style={{ textAlign: "center", padding: "100px 0", color: "var(--color-text-tertiary)" }}>
                 <div style={{ fontSize: 48, marginBottom: 16 }}>🚧</div>
                 <div style={{ fontSize: 20, fontWeight: 700, color: "var(--color-text-primary)", letterSpacing: "-0.02em" }}>Em construção</div>
